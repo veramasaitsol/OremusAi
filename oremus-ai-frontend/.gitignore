@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Env files (CRITICAL - never commit these)
+.env
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+
+# OS junk
+.DS_Store
+**/.DS_Store
+__MACOSX/
+**/__MACOSX/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Logs
+*.log
+logs/
+
+# Editor
+.vscode/
+.idea/
+
+# Claude Code workspace
+.claude/
+
+# Vite cache
+.vite/

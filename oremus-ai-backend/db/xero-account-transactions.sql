@@ -1,0 +1,51 @@
+-- Xero staging GL table (Path B posting engine).
+--
+-- Xero's full-GL /Journals endpoint is gated (401 for granular apps / non-Advanced
+-- tier), so we synthesize double-entry GL lines from source documents
+-- (invoices, bills, payments, bank transactions, credit notes, manual journals)
+-- and write them HERE first for validation. Once totals reconcile against Xero's
+-- own reports, verified rows are copied into the shared `account_transactions`
+-- table (same core columns) and reports run off that.
+--
+-- Mirrors account_transactions column-for-column, plus provenance columns
+-- (source_type/source_id/line_number/tracking/tax/currency) so every posted line
+-- is traceable back to the Xero document that produced it.
+
+-- CREATE TABLE IF NOT EXISTS `xero_account_transactions` (
+--   `id` int NOT NULL AUTO_INCREMENT,
+--   `user_id` int NOT NULL,
+--   `org_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+--   `transaction_id` varchar(150) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+--   `account_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+--   `transaction_date` date DEFAULT NULL,
+--   `account_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `account_group` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `account_type_code` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `transaction_details` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+--   `transaction_type` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `transaction_number` varchar(150) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+--   `reference_number` varchar(150) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `debit` decimal(15,2) DEFAULT '0.00',
+--   `credit` decimal(15,2) DEFAULT '0.00',
+--   `balance` decimal(15,2) DEFAULT '0.00',
+--   `balance_type` varchar(5) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `xero_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   -- provenance (staging-only; not copied into account_transactions)
+--   `source_type` varchar(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `source_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `line_number` int DEFAULT NULL,
+--   `tracking_category` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `tracking_option` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `tax_type` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `tax_amount` decimal(15,2) DEFAULT NULL,
+--   `currency_code` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+--   `synced_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+--   PRIMARY KEY (`id`),
+--   UNIQUE KEY `uq_xero_acct_txn` (`user_id`,`transaction_id`,`transaction_number`,`account_id`),
+--   KEY `idx_xero_at_org` (`user_id`,`org_id`),
+--   KEY `idx_xero_at_xero_id` (`xero_id`),
+--   KEY `idx_xero_at_source` (`source_type`,`source_id`),
+--   CONSTRAINT `xero_account_transactions_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

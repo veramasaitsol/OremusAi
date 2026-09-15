@@ -1,0 +1,829 @@
+{
+    "description": "DO NOT DELETE THIS FILE. This file is used to keep track of which files have been synced in the most recent deployment. If you delete this file a resync will need to be done (which can take a while) - read more: https://github.com/SamKirkland/FTP-Deploy-Action",
+    "version": "1.0.0",
+    "generatedTime": 1786094066992,
+    "data": [
+        {
+            "type": "file",
+            "name": "app.js",
+            "size": 11627,
+            "hash": "9cc2a00ca12fa3c60ea18c402f328ba8f099f48698a5e36cec232ea03f63ddc2"
+        },
+        {
+            "type": "folder",
+            "name": "config"
+        },
+        {
+            "type": "folder",
+            "name": "db"
+        },
+        {
+            "type": "folder",
+            "name": "docs"
+        },
+        {
+            "type": "file",
+            "name": "eslint.config.js",
+            "size": 1006,
+            "hash": "f2bbc60a45a2c2cc8aac75908b0af401a6a33216d5db0a1cd0978bc6a972c2f8"
+        },
+        {
+            "type": "folder",
+            "name": "middleware"
+        },
+        {
+            "type": "file",
+            "name": "package-lock.json",
+            "size": 240527,
+            "hash": "5a03132c359439d3af52f851d8f578e418fa593576763e74e4ef2427d213ba79"
+        },
+        {
+            "type": "file",
+            "name": "package.json",
+            "size": 754,
+            "hash": "48c2b2e0c1866776e7393cefb9349dc3a2f55a5c1baf21ee44b754e40109b34d"
+        },
+        {
+            "type": "folder",
+            "name": "postman"
+        },
+        {
+            "type": "folder",
+            "name": "routes"
+        },
+        {
+            "type": "folder",
+            "name": "services"
+        },
+        {
+            "type": "folder",
+            "name": "tmp"
+        },
+        {
+            "type": "folder",
+            "name": "utils"
+        },
+        {
+            "type": "file",
+            "name": "config/db.js",
+            "size": 2982,
+            "hash": "3438f573ecd42e216cc5c39cb0c1596ddf3e16d611f7e7a853c6cc0e22199116"
+        },
+        {
+            "type": "file",
+            "name": "db/REPORT_DASHBOARD_TABLES.md",
+            "size": 13947,
+            "hash": "99a67f6914c9c329f940d374f9919e24df1727900198ee5d741f938a193f5e6e"
+        },
+        {
+            "type": "file",
+            "name": "db/XERO_APIS_AND_TABLES.md",
+            "size": 5807,
+            "hash": "d0cb883ddbf08fded9e981976822a874611e977154dd493d7cd4ccf202f7fb02"
+        },
+        {
+            "type": "file",
+            "name": "db/acc-accounts.sql",
+            "size": 3329,
+            "hash": "7364c74d943bb012dde1fff7ce412f0b0d8f985bb8e253cce6e45a1eb5313427"
+        },
+        {
+            "type": "file",
+            "name": "db/acc-documents.sql",
+            "size": 3742,
+            "hash": "f3fb0508bfd0cb748680b80182bc1df71f4ccb037a6c713b43f6685f07c8c653"
+        },
+        {
+            "type": "file",
+            "name": "db/acc-journal-cashbasis.sql",
+            "size": 1857,
+            "hash": "678c215ba924286e1b9191f718e21ae8f6846e12e8832f5ed27fb90a5d22622b"
+        },
+        {
+            "type": "file",
+            "name": "db/acc-report-snapshots.sql",
+            "size": 4283,
+            "hash": "f4c17a71d0ff033aa427db1276cfc26bc2ac4b50d0370cfb5794e5302a54f8d0"
+        },
+        {
+            "type": "file",
+            "name": "db/accounting-engine.sql",
+            "size": 8704,
+            "hash": "56dc163aa20b31dfa162bced2502374dc7cea947f97aa676fbcdc1d9fc25422f"
+        },
+        {
+            "type": "file",
+            "name": "db/analytics-warehouse.sql",
+            "size": 13141,
+            "hash": "dc20ccdae30d0438b67598477ebc3ef982a4e30cf815cf2fb2ab20ee6eed764e"
+        },
+        {
+            "type": "file",
+            "name": "db/apply-sql.js",
+            "size": 1364,
+            "hash": "3da80fe97fa4572076a1c23365dd8c3b47dd6df0ee7876d41d75de49dfbdcb6f"
+        },
+        {
+            "type": "file",
+            "name": "db/backfill-zb-into-legacy.js",
+            "size": 4417,
+            "hash": "d434365efd53635594f3ec6dc95330eb35d00db31d87fdd0e689d8f5eeb9395a"
+        },
+        {
+            "type": "file",
+            "name": "db/clean-data-vensframe.sql",
+            "size": 2335,
+            "hash": "3ac2b8c0f7289181c036732e62339923e9c26a68610384f53f359f8cdb556bc4"
+        },
+        {
+            "type": "file",
+            "name": "db/clean-keep-users.sql",
+            "size": 3337,
+            "hash": "6e0fa3cf579228e91ee7c78d043629670c590931093745ac6db5c70b44513f72"
+        },
+        {
+            "type": "file",
+            "name": "db/consolidate-zb-into-legacy.js",
+            "size": 6807,
+            "hash": "0b9be8f1987e6a2f2383c381babc6d2001423f8f9a38443fb3c5e37208091b45"
+        },
+        {
+            "type": "file",
+            "name": "db/daybook-acct-txn-key-migration.sql",
+            "size": 1835,
+            "hash": "264ffc88d239f75a8af0d164ab491c570e52eaa412461ee1c965bc49e26c98ac"
+        },
+        {
+            "type": "file",
+            "name": "db/drop-duplicate-zb-tables.js",
+            "size": 4625,
+            "hash": "dc5cd81333817ff1a64275cba3e3c18caee9479d5ec8f8e5b765a5e5db829269"
+        },
+        {
+            "type": "file",
+            "name": "db/drop-qb-normalized-tables.sql",
+            "size": 2224,
+            "hash": "38a1bd9400835d3edb67b89a7d3508edc06847eae61f2f12ed65d4a8f8990ab2"
+        },
+        {
+            "type": "file",
+            "name": "db/drop-unused-zb-tables.js",
+            "size": 5492,
+            "hash": "f72c55853a925ed114a08a19c0eb618727991a8ce7d618970827e1feaccd5516"
+        },
+        {
+            "type": "file",
+            "name": "db/notifications-migration.sql",
+            "size": 1161,
+            "hash": "96eea849db87962ca647b5bca6aec1da73b19dd36c58d2d72e231d91ea486f5b"
+        },
+        {
+            "type": "file",
+            "name": "db/password-reset-migration.sql",
+            "size": 575,
+            "hash": "2667011e71cb62725c07326a50d8975c5fa38ff6d9042fde842318020bc9f810"
+        },
+        {
+            "type": "file",
+            "name": "db/qbo-accounts-migration.sql",
+            "size": 2285,
+            "hash": "b601239c6cdee6bba4ace6493a2d4807145729c4c62ab1dcb337df15635a6a70"
+        },
+        {
+            "type": "file",
+            "name": "db/quickbooks-account-transactions.sql",
+            "size": 3242,
+            "hash": "a8c47f1e1abf0acdf4ba4705701d89aa139fda42b8e546b6fa4eecaccc876709"
+        },
+        {
+            "type": "file",
+            "name": "db/quickbooks-warehouse.sql",
+            "size": 6036,
+            "hash": "8a1a14b38c9e129ef5a6da8ec8affcf7fecb331676837727b0275b539081668c"
+        },
+        {
+            "type": "file",
+            "name": "db/schema.sql",
+            "size": 26621,
+            "hash": "dce348c1ef8041be42fc215c93d345578c47868290fe5b874a85b36e2b5dedf7"
+        },
+        {
+            "type": "file",
+            "name": "db/raw-transactions.sql",
+            "size": 2735,
+            "hash": "21aefd4b0226c7f520eee9a609d1708c15282ec704d36a900730b047d41907eb"
+        },
+        {
+            "type": "file",
+            "name": "db/seed.js",
+            "size": 1136,
+            "hash": "c0277ba28c37a457473663a4773ee1edcd116582329b25a9b71998a83172e377"
+        },
+        {
+            "type": "file",
+            "name": "db/webhook-activity.sql",
+            "size": 2532,
+            "hash": "dc58be005f3164101145faa55e76239290aec2274b2e262fa61b8fc904230d6b"
+        },
+        {
+            "type": "file",
+            "name": "db/xero-account-transactions.sql",
+            "size": 3467,
+            "hash": "9d7b2834af182d753e77e9cee89ee50ead789f144b8d19d8f21ffdeed3ce56c0"
+        },
+        {
+            "type": "file",
+            "name": "db/xero-migration.sql",
+            "size": 4216,
+            "hash": "a129cf98e704907d7de97e7a5478b86569d3144265800bd48314191f823a19d7"
+        },
+        {
+            "type": "file",
+            "name": "db/zb-recurring-bills.sql",
+            "size": 1467,
+            "hash": "427ed1557fa61dbbcaa8d59a0e377d20247340d213114fcc447c8366066aa337"
+        },
+        {
+            "type": "file",
+            "name": "db/zb-bill-line-items.sql",
+            "size": 1785,
+            "hash": "9fd8d3f494cfbeb547fda0f50bda9c32ba16a9404723b31b47c4299ef2f58c59"
+        },
+        {
+            "type": "file",
+            "name": "db/zb-warehouse.sql",
+            "size": 82143,
+            "hash": "f871e788c87862cdd7d1187f7f0127ef33f9aa11c4e19689fcb1cf9751f50566"
+        },
+        {
+            "type": "file",
+            "name": "db/zb-reports-cache.sql",
+            "size": 1177,
+            "hash": "cd648493207e4e32303f181cb4e5e10f0a1666e886ad3b0aec265a1376cde146"
+        },
+        {
+            "type": "file",
+            "name": "docs/REPORTS_TABLE_MAP.md",
+            "size": 15639,
+            "hash": "5d879c1fc7dcd4394032e0301139ce86fe5459e8a8d5d78db8a924d58143d393"
+        },
+        {
+            "type": "file",
+            "name": "middleware/adminClientView.js",
+            "size": 1616,
+            "hash": "6344eedb1aa5658f93a1d45c1ece82c3724d08a98c7c7abbf07bfd9685cb85ff"
+        },
+        {
+            "type": "file",
+            "name": "middleware/auth.js",
+            "size": 545,
+            "hash": "643aa5ef1a02df82433c886ff9e59a7ee8d953b44656abe1a8c24b554e94d544"
+        },
+        {
+            "type": "file",
+            "name": "middleware/orgScope.js",
+            "size": 1730,
+            "hash": "7fd3ebfb08ebfaa4b285b9df88e40a2b439ba90845f33bacb3d966d04a1fadb5"
+        },
+        {
+            "type": "file",
+            "name": "postman/Oremus-API.postman_collection.json",
+            "size": 18289,
+            "hash": "ff1a09b61e6eba090a94d2e5284bc982d36017de4f583963fc22de32bfd26cd3"
+        },
+        {
+            "type": "folder",
+            "name": "routes/__tests__"
+        },
+        {
+            "type": "file",
+            "name": "routes/accounting.js",
+            "size": 14976,
+            "hash": "88314d7ec74ff0970b5b6fd2448bf76336d9a01c49ce5951820b143cd39fb837"
+        },
+        {
+            "type": "file",
+            "name": "routes/analytics.js",
+            "size": 15295,
+            "hash": "3519ecdb88c81692f3e8afd0d4cf13146a47a67992d4f447f5d8995b9b888d61"
+        },
+        {
+            "type": "file",
+            "name": "routes/auth.js",
+            "size": 56609,
+            "hash": "651f1fb24aa382a2f925fcb2863c9ca76f64ebee9d7f8f1db7f2062f0cd5d4fa"
+        },
+        {
+            "type": "file",
+            "name": "routes/clients.js",
+            "size": 16864,
+            "hash": "c789ad01ab79656fd52af2678a7483ae891c471d3e7a5d7b3bce4670244a4944"
+        },
+        {
+            "type": "file",
+            "name": "routes/customers.js",
+            "size": 1622,
+            "hash": "e566abf6fed5bc9544ed604ac57da0a467c585e953c1648d9d6ce974685d1f7d"
+        },
+        {
+            "type": "file",
+            "name": "routes/dashboard.js",
+            "size": 111822,
+            "hash": "ff0621ca5e7023b772e99fc1aad98864b89217747dc36615d1b28c15c0727f7d"
+        },
+        {
+            "type": "file",
+            "name": "routes/metrics.js",
+            "size": 3908,
+            "hash": "cd220287d8d9aa6d960309efa612166b752b355e299b385575128dfbd44115e8"
+        },
+        {
+            "type": "file",
+            "name": "routes/dayBook.js",
+            "size": 7844,
+            "hash": "fb1f95b69102b46f13dcb3acdeb8174256ec05e5f7180831c15028be0a9ea081"
+        },
+        {
+            "type": "file",
+            "name": "routes/notifications.js",
+            "size": 4486,
+            "hash": "3c8b335177a9bd888d56355458f9440899cb15a9595f71fa738c5e2fb3a6d3fd"
+        },
+        {
+            "type": "file",
+            "name": "routes/qbWarehouse.js",
+            "size": 4657,
+            "hash": "62427d01d67563fa18865721594d9a28c845ab47ed4fd4bf92cc2edd1236c150"
+        },
+        {
+            "type": "file",
+            "name": "routes/quickbooks.js",
+            "size": 6090,
+            "hash": "44da86f25a7273277078276d0fea2683dd58bbe6682eda56cb00d2453f82798f"
+        },
+        {
+            "type": "file",
+            "name": "routes/ratios.js",
+            "size": 7620,
+            "hash": "461efed47592fc958db6992b838ed70bef5cff4cedbc43e0a71b8b94363b85f6"
+        },
+        {
+            "type": "file",
+            "name": "routes/reportExport.js",
+            "size": 2587,
+            "hash": "314805d4010c24a4e4332d4d0ad5979929c051165cce2ce15888f13fe2716b15"
+        },
+        {
+            "type": "file",
+            "name": "routes/reports.js",
+            "size": 6948,
+            "hash": "e0b8cc10ce24e2aa2fff024762ece46283266163dfeaad89270180c72efbb53f"
+        },
+        {
+            "type": "file",
+            "name": "routes/search.js",
+            "size": 3976,
+            "hash": "f4846930d42e5e0a7df1d16633607a8a9c8870e6f7faad4db59c2072648dca3d"
+        },
+        {
+            "type": "file",
+            "name": "routes/sync.js",
+            "size": 23200,
+            "hash": "e0293953a0715bd5398c99560a159adbcc25f8e239af02fc8734d98f1cf2e00e"
+        },
+        {
+            "type": "file",
+            "name": "routes/transactions.js",
+            "size": 12102,
+            "hash": "c8e1148c2db89a484327f464988f4798e726c3f88b52b2e5ff692be20d2b6309"
+        },
+        {
+            "type": "file",
+            "name": "routes/vendors.js",
+            "size": 1608,
+            "hash": "2eecb1dc7d55d20e9bd95dd99ad573f1d0aca6cb8fe8c02acb1df772d17c315a"
+        },
+        {
+            "type": "file",
+            "name": "routes/webhooks.js",
+            "size": 5388,
+            "hash": "0ddbbd77ff3cd69b35e3f0a9852a306cd50804fe675fe8ab7083a582b2aef865"
+        },
+        {
+            "type": "file",
+            "name": "routes/xero.js",
+            "size": 5941,
+            "hash": "4916c1162ecf53e634d9d5310f709ff7cdde6a908b0a570be872ea88ba11a009"
+        },
+        {
+            "type": "file",
+            "name": "routes/zbReports.js",
+            "size": 11086,
+            "hash": "115f416e372784b1695c4e223106b0b304e693ec3164c4777d217a529fcfd968"
+        },
+        {
+            "type": "file",
+            "name": "routes/zbWarehouse.js",
+            "size": 9258,
+            "hash": "3c2436e6ba9fc3c67c12a6eb0a71e1d37ef61db3ce36a30b925c649073d014e7"
+        },
+        {
+            "type": "folder",
+            "name": "services/__tests__"
+        },
+        {
+            "type": "file",
+            "name": "routes/zoho.js",
+            "size": 7621,
+            "hash": "852601321eb55cfa6a4898446fe802e69e5796fa58cd018f0b83f0029feb6dfc"
+        },
+        {
+            "type": "folder",
+            "name": "services/accounting"
+        },
+        {
+            "type": "file",
+            "name": "services/accountingLedgerService.js",
+            "size": 8325,
+            "hash": "c02b1c15a96d3c324d0f708d79733b553e1f84fb567e12843ef455176e7f5f87"
+        },
+        {
+            "type": "file",
+            "name": "services/analyticsWarehouseService.js",
+            "size": 15773,
+            "hash": "de2597bd75551e87fbc55d4318dbb09905e1f6488cce6f6c7cf96f773ae14fea"
+        },
+        {
+            "type": "file",
+            "name": "services/bankSummaryService.js",
+            "size": 5036,
+            "hash": "611573a23ebe6c759a0672cbae025fd3bfa5b50b321ab76afc2cabeaeece96be"
+        },
+        {
+            "type": "file",
+            "name": "services/budgetFromPLService.js",
+            "size": 7835,
+            "hash": "3dc52f87b90d2eab628a2c8a7d2e3a4165e3b6b13f12062cab31cbdee9d2f8a6"
+        },
+        {
+            "type": "file",
+            "name": "services/budgetSummaryService.js",
+            "size": 1634,
+            "hash": "7cba69af7fbf218f6833c93e5441267dfbeb9d1089dbcc06f1a03376c3cf5ba2"
+        },
+        {
+            "type": "file",
+            "name": "services/budgetVarianceService.js",
+            "size": 12424,
+            "hash": "78da424b423805c3c9cca3e20789bf82e5a97719f1c943a7c4b8dac531523cc7"
+        },
+        {
+            "type": "file",
+            "name": "services/cashFlowStatementService.js",
+            "size": 8775,
+            "hash": "51ef604f72755983deaf8c7404da6eea8cf2343a493abbe5d3673095ef116fc9"
+        },
+        {
+            "type": "file",
+            "name": "services/cashSummaryService.js",
+            "size": 12499,
+            "hash": "8acf1ac4c6e00ded7771247a23c16e0fd41248f7a781b5458a81217cc714e135"
+        },
+        {
+            "type": "file",
+            "name": "services/executiveSummaryService.js",
+            "size": 23737,
+            "hash": "596a08612ec83c8e60af0eb7a4c44aa4983d97c2a90b7252618ee76800e41edd"
+        },
+        {
+            "type": "file",
+            "name": "services/notificationsService.js",
+            "size": 4283,
+            "hash": "6f8553a34dd5816e2e249a678d5e7b876fd0056eee0a41322ddc589a4ee2f30b"
+        },
+        {
+            "type": "file",
+            "name": "services/metricsService.js",
+            "size": 40639,
+            "hash": "7eb1bc354a39844b7637c104a9869bfe673be7e4070dc731134e2b05f7622e65"
+        },
+        {
+            "type": "file",
+            "name": "services/quickbooksReportsService.js",
+            "size": 25111,
+            "hash": "9e0d0085300d9d5176e213b5e23808fa72de2cb2896d3aef2e7a5304f85c2679"
+        },
+        {
+            "type": "file",
+            "name": "services/quickbooksBudgetVarianceService.js",
+            "size": 1328,
+            "hash": "98f4e6c564faa9c31619e26256b7212057d2647b0932bae7f631222483539c8a"
+        },
+        {
+            "type": "file",
+            "name": "services/quickbooksService.js",
+            "size": 49546,
+            "hash": "e04606223f219aeec367f30fe7c5e211cbb0df5218525e737c873898cdd42d91"
+        },
+        {
+            "type": "file",
+            "name": "services/quickbooksWarehouseService.js",
+            "size": 9294,
+            "hash": "c735f068d0f7e85c4a2123eee8c8d841e4a2f1096ba0c13b696941487923ee56"
+        },
+        {
+            "type": "file",
+            "name": "services/salesArFromInvoicesService.js",
+            "size": 25713,
+            "hash": "b8fc7c130a26bc267fedea0b0549a37a618fe5fc7c53cf6ffc29e6ad5526c83a"
+        },
+        {
+            "type": "file",
+            "name": "services/xeroBudgetVarianceService.js",
+            "size": 1367,
+            "hash": "d0a1fa0325932b7f92aa5f23705d39509025435f74d27f7ea5ff7e9a526afd61"
+        },
+        {
+            "type": "file",
+            "name": "services/xeroCashFlowService.js",
+            "size": 10232,
+            "hash": "068f5f198b4ad22ae676d234f567d0f45829b8f4f10c3770574f848e20a85786"
+        },
+        {
+            "type": "file",
+            "name": "services/xeroPostingEngine.js",
+            "size": 44953,
+            "hash": "63baa6581c8ba5fa52072dbd9f787610e35ebb4132096ec59a48bdfd4e017db9"
+        },
+        {
+            "type": "file",
+            "name": "services/xeroService.js",
+            "size": 42221,
+            "hash": "7bb58718cdd69b27257945546c79b6dd4457ade6d886254e762c0a742db9d83c"
+        },
+        {
+            "type": "file",
+            "name": "services/xeroReportsService.js",
+            "size": 29764,
+            "hash": "c4ba5b577e132ac53951aff111cde6f7cd2ffd242ca29ab42f172040cd1feb82"
+        },
+        {
+            "type": "file",
+            "name": "services/zoho1099ContractorBalanceService.js",
+            "size": 8020,
+            "hash": "b1d9afb106baff2822ce4f54328727bf7a55b71e6237ac75690ba311f8328e73"
+        },
+        {
+            "type": "file",
+            "name": "services/zoho1099TransactionDetailService.js",
+            "size": 12509,
+            "hash": "fa993d1aadafecee683f3b356bb7cbfc9431b40e591b00963653e6dfefd3e527"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoApAgingDetailService.js",
+            "size": 17233,
+            "hash": "a649a1427b428dee8d6b9647508a8354a3883044b5484f718c611110039759be"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoArAgingDetailService.js",
+            "size": 11166,
+            "hash": "47a5006ec884dd818cfabfab2f3ada2401e3c1d94b255874a597e18a159baa82"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoBankReconciliationService.js",
+            "size": 14840,
+            "hash": "d53228c7851f3cc21a4998115d1687d0d9c967b8a880d06634e1ea977a8ec620"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoBooksReportsService.js",
+            "size": 77208,
+            "hash": "e39fa121d43e18ca688a8fb3e69c061e9a9baa6a947be8245d788ba33f6c21f0"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoBooksWarehouseService.js",
+            "size": 89625,
+            "hash": "60df4ac0aab9a39994113ba3f85131d62bfe77fa7184b54a642128862dd16ba1"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoChartOfAccountsService.js",
+            "size": 10297,
+            "hash": "e7c48be1355971832e4429feb350d2331fd5161005b10adc06761a81fe6d00e8"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoCreditNoteDetailsService.js",
+            "size": 3611,
+            "hash": "6819e127e038d5a8dc28848798cde279b6f6420648e756c19f54b800930d8b51"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoExpensesByVendorSummaryService.js",
+            "size": 7524,
+            "hash": "c06ee7c691a72e60df9ce19f9a67e9412d6b5f6ba9d03d55f8d458138a7343f9"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoForexService.js",
+            "size": 22235,
+            "hash": "6f153549ef884edc1a2d77c111d602e7f105f2aa87993c0220042b571751f77e"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoGlReportsService.js",
+            "size": 33270,
+            "hash": "ba1c53655a3b87d17109f0a5b21682a7e036cc56a897d30219cd949302054d3b"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoGstReturnsWorkbookService.js",
+            "size": 13796,
+            "hash": "04c5ed4d8f7384b4c1e85a2db8748b6f490bea9667e3ac61e80f132f85ac7b39"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoInventoryItemSummaryService.js",
+            "size": 9367,
+            "hash": "79ba181ad112924d4f7a3bd35f7ddbcb43eeffc9bcefe29ad913b6afa4f755b4"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoLedgerReportsService.js",
+            "size": 28523,
+            "hash": "59aa8fd0ca059ddf90235a0ad172d5de23ad99067030e765e744ccbe15df52c2"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoLedgerRegistry.js",
+            "size": 7114,
+            "hash": "1dca4ef1e948c0ca1709f2eb631365f9e14fd654da35ead14d4672b1078d21cc"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoPurchasesByItemService.js",
+            "size": 5328,
+            "hash": "2551bc8e51962aec4654f2d7e5b21d35493b4728b581ed5315496e39ea656c00"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoRecurringBillsService.js",
+            "size": 3885,
+            "hash": "db95176e0d53db82f3f868aa685adc69f16d00d7b1ec7bb29e0b7cc3049e3456"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoSalesByProductDetailService.js",
+            "size": 7574,
+            "hash": "0b861ab6d073ced43cfd13671faf5332f67369606237e41ac0b249fad6cefdb1"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoService.js",
+            "size": 27343,
+            "hash": "66cc02546aec20ce9f7f060638ba8e1fdb964c1dad7d0aecf922344640076a68"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoSupplierInvoiceSummaryService.js",
+            "size": 10636,
+            "hash": "25b06490c90406115e524107ddb7848cad2ea5a28a2d4146c9fcf35670eb066d"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoTaxLiabilityService.js",
+            "size": 15598,
+            "hash": "704c3ac4c549e439f7ffed1192c1d6172f57d427cf36109ea93dced18a344694"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoTdsSummaryService.js",
+            "size": 11042,
+            "hash": "ca0f7aa78990bea505eabaaad426ed14bd5f2f6e2a81e3a180b27a11f8ceb4b8"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoTransactionDetailByAccountService.js",
+            "size": 10670,
+            "hash": "ad9983f4e37ca48ad6f2301f6c8a8cc53993527dd29ea3b6da9e2b19064fba81"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoTransactionListByVendorService.js",
+            "size": 11213,
+            "hash": "1f1f3aa9d3a02ebe0a9e302a22cbbf03d17035c77a47ec85c4c890722884e348"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoVendorBalanceDetailService.js",
+            "size": 6268,
+            "hash": "039910134adbb5862f188cf73e518fdd536fe5706c1ba2807c41ed23b77f3ec0"
+        },
+        {
+            "type": "file",
+            "name": "services/zohoVendorContactListService.js",
+            "size": 3818,
+            "hash": "f427a7fbbbf7b0184c85c617a1e7853ee757c20f2336fd479036c7e9afb58966"
+        },
+        {
+            "type": "file",
+            "name": "tmp/restart.txt",
+            "size": 48,
+            "hash": "88917fd88d4fd53ddad5567eaf60e8bea046d6c6d283260d3a2f1dd41ff8e107"
+        },
+        {
+            "type": "file",
+            "name": "utils/cache.js",
+            "size": 1960,
+            "hash": "3dbf336623eb8bf85097a2c747c748aae30fa6eea2fabdd21bf2de12dcaae6ce"
+        },
+        {
+            "type": "file",
+            "name": "utils/jobQueue.js",
+            "size": 1855,
+            "hash": "864763c8c5ca5be928d21ce54489da8bf93c37b1e4a7f45cf2eed1f5c53a1c48"
+        },
+        {
+            "type": "file",
+            "name": "utils/reauthError.js",
+            "size": 950,
+            "hash": "473967dc330b659f394bb56ba54fc4e77e8a1b60635ffecd11f608b71ade28a4"
+        },
+        {
+            "type": "file",
+            "name": "utils/reportExport.js",
+            "size": 7343,
+            "hash": "ca8d05c0e46eb34e8dda649c861e0aaccc9248f21615b7961a3fb3f1941d02a2"
+        },
+        {
+            "type": "file",
+            "name": "utils/singleFlight.js",
+            "size": 2284,
+            "hash": "7d1bae74c3a764ad0e5d4e1a67913ddc2a94fb86717ee4621633e7cb6225914c"
+        },
+        {
+            "type": "file",
+            "name": "utils/tableExists.js",
+            "size": 828,
+            "hash": "3218903a500adb5c41b14004e1b6f2dfc28e24a083b731457d211eef49c9e096"
+        },
+        {
+            "type": "file",
+            "name": "db/quickbooks-migration.sql",
+            "size": 2835,
+            "hash": "3dca6d5b31ff6e7a3433d8cad2e9cbd5c1b80cd8186c3f22df04abfc527ebaf0"
+        },
+        {
+            "type": "file",
+            "name": "services/__tests__/metricsService.test.js",
+            "size": 7791,
+            "hash": "47c21a419bbf5f43bc9b8b2fca2f75e5312e2877fbb9157c5de396a789c9a9ca"
+        },
+        {
+            "type": "file",
+            "name": "routes/__tests__/metrics.test.js",
+            "size": 5682,
+            "hash": "c00c917ad014875870699f39624f7360e9df0105c27823f1180c77b511336a57"
+        },
+        {
+            "type": "file",
+            "name": "services/accounting/AccountingProvider.js",
+            "size": 3672,
+            "hash": "44de0a21da1df7df86932ccd6568a5743915d3e2b758b4cf94d26f199d1d49a6"
+        },
+        {
+            "type": "file",
+            "name": "services/accounting/XeroProvider.js",
+            "size": 12156,
+            "hash": "b2d0907185674a027eae86dbfe6ef4dfe1bdb2b286e23b48f0d415a3a4b12b9a"
+        },
+        {
+            "type": "file",
+            "name": "services/accounting/QuickBooksProvider.js",
+            "size": 13546,
+            "hash": "e8509ee83fe545d16b49e6197a356e4c55ce07affa3e9b0b6b6083190bbdd889"
+        },
+        {
+            "type": "file",
+            "name": "services/accounting/ZohoBooksProvider.js",
+            "size": 6117,
+            "hash": "41d014758091b23821f7d6c55b7857c647ee73870d9e3c4f484e324c252ca449"
+        },
+        {
+            "type": "file",
+            "name": "services/accounting/accAccountsBackfill.js",
+            "size": 5481,
+            "hash": "708e4f9c3f350f0c38d89d6afa96e9d3ee70d3f34cda726675efb5936938e6b6"
+        },
+        {
+            "type": "file",
+            "name": "services/accounting/index.js",
+            "size": 1827,
+            "hash": "0fe471f569040a468d5e51d79a0d3d027036f867a76cb6c2c1e2589043f1590d"
+        }
+    ]
+}

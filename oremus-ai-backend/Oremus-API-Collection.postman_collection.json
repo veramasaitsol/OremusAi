@@ -1,0 +1,1921 @@
+{
+  "info": {
+    "name": "Oremus AI — Full API Collection",
+    "description": "Complete Postman collection for the Oremus AI backend (api.oremusai.vensframe.com).\n\nBase URL: https://api.oremusai.vensframe.com\n\nAuthentication:\n• Most endpoints require a JWT Bearer token.\n• Login first via POST /api/auth/login, then set the {{token}} variable.\n• Admin endpoints use X-Client-Id header to switch between clients.\n\nSupported Platforms: Zoho Books, Xero, QuickBooks Online.\n\nFolders:\n1. Health — Server health check\n2. Auth — Login, password reset, OAuth flows (Zoho/QBO/Xero)\n3. Dashboard — KPIs, trends, charts\n4. Metrics — Revenue, profitability, cashflow metrics\n5. Ratios — Financial ratio calculations\n6. Reports — Provider-agnostic report facade\n7. ZB Reports — Full report library (P&L, Balance Sheet, Trial Balance, etc.)\n8. Report Export — Download reports as XLSX or PDF\n9. Accounting — GL ledger, accounts, journal entries\n10. Analytics — ETL rebuilds and analytics dashboards\n11. Customers — Customer listing\n12. Vendors — Vendor listing\n13. Transactions — Invoice/bill/expense/bank/account-transaction listings\n14. Day Book — Day book view\n15. Clients (Admin) — Client CRUD and provider connections\n16. Search — Global search\n17. Sync — Data sync for all platforms\n18. ZB Warehouse — Zoho Books warehouse sync\n19. QB Warehouse — QuickBooks warehouse sync\n20. Provider Accounts — Platform-specific account summaries\n21. Webhooks — Provider webhook receivers\n22. Notifications — User notifications",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "oremusai"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{token}}", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://api.oremusai.vensframe.com", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "orgId", "value": "", "type": "string" },
+    { "key": "clientId", "value": "", "type": "string" },
+    { "key": "fromDate", "value": "2025-04-01", "type": "string" },
+    { "key": "toDate", "value": "2026-03-31", "type": "string" },
+    { "key": "basis", "value": "accrual", "type": "string" },
+    { "key": "userId", "value": "", "type": "string" },
+    { "key": "clientIdParam", "value": "", "type": "string" },
+    { "key": "tenantId", "value": "", "type": "string" },
+    { "key": "realmId", "value": "", "type": "string" },
+    { "key": "reportSlug", "value": "profit-loss", "type": "string" },
+    { "key": "zbReportType", "value": "profitandloss", "type": "string" },
+    { "key": "notificationId", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/health", "host": ["{{baseUrl}}"], "path": ["api", "health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var data = pm.response.json();",
+                  "if (data.token) { pm.environment.setVariable('token', data.token); pm.environment.setVariable('userId', data.id); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/login", "host": ["{{baseUrl}}"], "path": ["api", "auth", "login"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"admin@example.com\",\n  \"password\": \"password123\"\n}" }
+          }
+        },
+        {
+          "name": "Forgot Password",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/forgot-password", "host": ["{{baseUrl}}"], "path": ["api", "auth", "forgot-password"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"admin@example.com\"\n}" }
+          }
+        },
+        {
+          "name": "Reset Password",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/reset-password", "host": ["{{baseUrl}}"], "path": ["api", "auth", "reset-password"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"token\": \"<reset_token>\",\n  \"password\": \"newpassword123\"\n}" }
+          }
+        },
+        {
+          "name": "── Zoho OAuth ──",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "Benchmark request for folder separator", "host": [] },
+            "description": "── Zoho OAuth ──"
+          },
+          "event": []
+        },
+        {
+          "name": "Zoho — Start OAuth (redirect)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/start?token={{token}}", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "start"], "query": [{ "key": "token", "value": "{{token}}" }] },
+            "description": "Browser redirect entry point. Opens Zoho consent screen."
+          }
+        },
+        {
+          "name": "Zoho — Exchange Code",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/exchange", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "exchange"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"code\": \"<auth_code>\",\n  \"redirect_uri\": \"https://api.oremusai.vensframe.com/api/auth/zoho/callback\"\n}" }
+          }
+        },
+        {
+          "name": "Zoho — Save Tokens",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/save", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "save"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"access_token\": \"<access_token>\",\n  \"refresh_token\": \"<refresh_token>\",\n  \"expires_in\": 3600\n}" }
+          }
+        },
+        {
+          "name": "Zoho — Status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/status", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "status"] }
+          }
+        },
+        {
+          "name": "Zoho — Refresh Token",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/refresh", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "refresh"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Zoho — List Organizations",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/organizations", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "organizations"] }
+          }
+        },
+        {
+          "name": "Zoho — Select Organization",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/select-org", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "select-org"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"orgId\": \"<organization_id>\"\n}" }
+          }
+        },
+        {
+          "name": "Zoho — Disconnect",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/disconnect", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "disconnect"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Zoho — Callback (server redirect)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/zoho/callback?code=<auth_code>&state=<jwt>", "host": ["{{baseUrl}}"], "path": ["api", "auth", "zoho", "callback"] },
+            "description": "Server-side OAuth callback — redirects to frontend. Called by Zoho after consent."
+          }
+        },
+        {
+          "name": "── QuickBooks OAuth ──",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "Benchmark request for folder separator", "host": [] },
+            "description": "── QuickBooks OAuth ──"
+          }
+        },
+        {
+          "name": "QuickBooks — Start OAuth (redirect)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/quickbooks/start?token={{token}}", "host": ["{{baseUrl}}"], "path": ["api", "auth", "quickbooks", "start"], "query": [{ "key": "token", "value": "{{token}}" }] }
+          }
+        },
+        {
+          "name": "QuickBooks — Exchange Code",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/quickbooks/exchange", "host": ["{{baseUrl}}"], "path": ["api", "auth", "quickbooks", "exchange"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"code\": \"<auth_code>\",\n  \"realmId\": \"<realm_id>\"\n}" }
+          }
+        },
+        {
+          "name": "QuickBooks — Save Tokens",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/quickbooks/save", "host": ["{{baseUrl}}"], "path": ["api", "auth", "quickbooks", "save"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"access_token\": \"<access_token>\",\n  \"refresh_token\": \"<refresh_token>\",\n  \"expires_in\": 3600,\n  \"realm_id\": \"<realm_id>\"\n}" }
+          }
+        },
+        {
+          "name": "QuickBooks — Status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/quickbooks/status", "host": ["{{baseUrl}}"], "path": ["api", "auth", "quickbooks", "status"] }
+          }
+        },
+        {
+          "name": "QuickBooks — Refresh Token",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/quickbooks/refresh", "host": ["{{baseUrl}}"], "path": ["api", "auth", "quickbooks", "refresh"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "QuickBooks — Disconnect",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/quickbooks/disconnect", "host": ["{{baseUrl}}"], "path": ["api", "auth", "quickbooks", "disconnect"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "QuickBooks — Callback (server redirect)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/quickbooks/callback?code=<auth_code>&realmId=<realm_id>&state=<jwt>", "host": ["{{baseUrl}}"], "path": ["api", "auth", "quickbooks", "callback"] },
+            "description": "Server-side OAuth callback — redirects to frontend."
+          }
+        },
+        {
+          "name": "── Xero OAuth ──",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "Benchmark request for folder separator", "host": [] },
+            "description": "── Xero OAuth ──"
+          }
+        },
+        {
+          "name": "Xero — Start OAuth (redirect)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/xero/start?token={{token}}", "host": ["{{baseUrl}}"], "path": ["api", "auth", "xero", "start"], "query": [{ "key": "token", "value": "{{token}}" }] }
+          }
+        },
+        {
+          "name": "Xero — Exchange Code",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/xero/exchange", "host": ["{{baseUrl}}"], "path": ["api", "auth", "xero", "exchange"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"code\": \"<auth_code>\"\n}" }
+          }
+        },
+        {
+          "name": "Xero — Save Tokens",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/xero/save", "host": ["{{baseUrl}}"], "path": ["api", "auth", "xero", "save"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"access_token\": \"<access_token>\",\n  \"refresh_token\": \"<refresh_token>\",\n  \"expires_in\": 1800,\n  \"tenant_id\": \"<tenant_id>\"\n}" }
+          }
+        },
+        {
+          "name": "Xero — Status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/xero/status", "host": ["{{baseUrl}}"], "path": ["api", "auth", "xero", "status"] }
+          }
+        },
+        {
+          "name": "Xero — Refresh Token",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/xero/refresh", "host": ["{{baseUrl}}"], "path": ["api", "auth", "xero", "refresh"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Xero — Disconnect",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/auth/xero/disconnect", "host": ["{{baseUrl}}"], "path": ["api", "auth", "xero", "disconnect"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Xero — Callback (server redirect)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/auth/xero/callback?code=<auth_code>&state=<jwt>", "host": ["{{baseUrl}}"], "path": ["api", "auth", "xero", "callback"] },
+            "description": "Server-side OAuth callback — redirects to frontend."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "Dashboard Overview",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Revenue Trend",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/revenue-trend?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "revenue-trend"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Expense Trend",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/expense-trend?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "expense-trend"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Cashflow Trend",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/cashflow-trend?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "cashflow-trend"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Top Customers",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/top-customers?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "top-customers"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Top Vendors",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/top-vendors?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "top-vendors"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Expense Breakdown",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/expense-breakdown?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "expense-breakdown"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Activity",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/activity?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "activity"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Profitability",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/profitability?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "profitability"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Liquidity",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/liquidity?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "liquidity"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Efficiency",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/efficiency?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "efficiency"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "KPI — Revenue",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/kpi/revenue?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "kpi", "revenue"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "KPI — Cash",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/kpi/cash?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "kpi", "cash"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "KPI — Burn / Runway",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/kpi/burn?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "kpi", "burn"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "KPI — Receivables",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/kpi/receivables?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "kpi", "receivables"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Compliance",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/dashboard/compliance?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "dashboard", "compliance"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Metrics",
+      "item": [
+        {
+          "name": "Revenue Metrics",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/metrics/revenue?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "metrics", "revenue"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Profitability Metrics",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/metrics/profitability?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "metrics", "profitability"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Cashflow Metrics",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/metrics/cashflow?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "metrics", "cashflow"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ratios",
+      "item": [
+        {
+          "name": "Financial Ratios",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/ratios?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "ratios"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reports",
+      "item": [
+        {
+          "name": "List All Report Slugs",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports", "host": ["{{baseUrl}}"], "path": ["api", "reports"] },
+            "description": "Returns all available canonical report slugs (profit-loss, balance-sheet, etc.) for the current provider."
+          }
+        },
+        {
+          "name": "Fetch Report by Slug",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/{{reportSlug}}?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "{{reportSlug}}"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]},
+            "description": "Slugs: profit-loss, balance-sheet, cash-flow, movement-of-equity, trial-balance, general-ledger, sales-by-customer, sales-by-item, invoice-details, customer-balance, ar-aging, ar-aging-detail, vendor-balance, ap-aging, ap-aging-detail, bill-details, tax-summary, inventory-summary"
+          }
+        },
+        {
+          "name": "── Profit & Loss ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Profit & Loss",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/profit-loss?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "profit-loss"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Balance Sheet",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/balance-sheet?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "balance-sheet"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Cash Flow",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/cash-flow?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "cash-flow"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Trial Balance",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/trial-balance?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "trial-balance"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "General Ledger",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/general-ledger?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "general-ledger"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "AR Aging Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/ar-aging?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "ar-aging"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "AP Aging Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/ap-aging?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "ap-aging"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Customer Balance Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/customer-balance?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "customer-balance"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Vendor Balance Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/vendor-balance?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "vendor-balance"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Movement of Equity",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/movement-of-equity?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "movement-of-equity"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Sales by Customer (Zoho)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/sales-by-customer?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "sales-by-customer"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Sales by Item (Zoho)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/sales-by-item?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "sales-by-item"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Invoice Details (Zoho)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/invoice-details?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "invoice-details"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Bill Details (Zoho)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/bill-details?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "bill-details"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Tax Summary (Zoho)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/tax-summary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "tax-summary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Inventory Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/reports/inventory-summary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "reports", "inventory-summary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "ZB Reports (Full Library)",
+      "description": "Extended report library served from local ledger. Covers Zoho-specific reports.",
+      "item": [
+        {
+          "name": "List Available Report Types",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/types", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "types"] }
+          }
+        },
+        {
+          "name": "Fetch ZB Report by Type",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/{{zbReportType}}?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "{{zbReportType}}"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]},
+            "description": "Types: profitandloss, cashflow, expensedetails, executivesummary, budgetsummary, budgetvariance, cashsummary, cashflowstatement, salesbyproductdetail, inventoryitemsummary, apagingdetail, apagingsummary, vendorbalancedetail, 1099transactiondetail, 1099contractorbalance, expensesbyvendorsummary, supplierinvoicesummary, vendorcontactlist, chartofaccounts, transactiondetailbyaccount, transactionlistbyvendor, taxliability, purchasesbyitem, tdssummary, gstreturnsworkbook, recurringbills, recurringinvoices, foreigncurrencygainsandlosses, realizedgainorloss, bankreconciliation, balancesheet, trialbalance, generalledger, creditnotedetails"
+          }
+        },
+        {
+          "name": "── Core Financial ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Profit & Loss",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/profitandloss?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "profitandloss"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Balance Sheet",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/balancesheet?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "balancesheet"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Trial Balance",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/trialbalance?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "trialbalance"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "General Ledger",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/generalledger?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "generalledger"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Cash Flow Statement",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/cashflowstatement?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "cashflowstatement"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Executive Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/executivesummary?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "executivesummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── Cash Reports ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Cash Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/cashsummary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "cashsummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Bank Reconciliation",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/bankreconciliation?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "bankreconciliation"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── Budget Reports ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Budget Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/budgetsummary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "budgetsummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Budget Variance",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/budgetvariance?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "budgetvariance"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── AP / Vendor Reports ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "AP Aging Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/apagingsummary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "apagingsummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "AP Aging Detail",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/apagingdetail?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "apagingdetail"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Vendor Balance Detail",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/vendorbalancedetail?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "vendorbalancedetail"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Expenses by Vendor Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/expensesbyvendorsummary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "expensesbyvendorsummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Supplier Invoice Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/supplierinvoicesummary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "supplierinvoicesummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Vendor Contact List",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/vendorcontactlist?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "vendorcontactlist"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Recurring Bills",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/recurringbills?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "recurringbills"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── Sales / Inventory ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Sales by Product Detail",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/salesbyproductdetail?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "salesbyproductdetail"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Inventory Item Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/inventoryitemsummary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "inventoryitemsummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Purchases by Item",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/purchasesbyitem?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "purchasesbyitem"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── Expense Reports ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Expense Details",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/expensedetails?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "expensedetails"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Transaction Detail by Account",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/transactiondetailbyaccount?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "transactiondetailbyaccount"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Transaction List by Vendor",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/transactionlistbyvendor?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "transactionlistbyvendor"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── Tax / Compliance ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Tax Liability",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/taxliability?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "taxliability"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "TDS Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/tdssummary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "tdssummary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "GST Returns Workbook",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/gstreturnsworkbook?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "gstreturnsworkbook"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── 1099 / Contractor ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "1099 Transaction Detail",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/1099transactiondetail?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "1099transactiondetail"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "1099 Contractor Balance",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/1099contractorbalance?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "1099contractorbalance"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "── Other ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Chart of Accounts",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/chartofaccounts?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "chartofaccounts"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Credit Note Details",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/creditnotedetails?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "creditnotedetails"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Forex Gains & Losses",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/foreigncurrencygainsandlosses?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "foreigncurrencygainsandlosses"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Realised Forex Gain/Loss",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zb-reports/realizedgainorloss?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "zb-reports", "realizedgainorloss"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Report Export",
+      "item": [
+        {
+          "name": "Export Report (XLSX/PDF)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/report-export?format=xlsx", "host": ["{{baseUrl}}"], "path": ["api", "report-export"], "query": [
+              { "key": "format", "value": "xlsx", "description": "xlsx or pdf" }
+            ]},
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportName\": \"Profit and Loss\",\n  \"data\": {\n    \"columns\": [\"Account\", \"Amount\"],\n    \"rows\": [[\"Revenue\", 100000], [\"Expenses\", 60000]],\n    \"currency\": \"INR\"\n  },\n  \"meta\": {\n    \"company\": \"My Company\",\n    \"basis\": \"accrual\",\n    \"from\": \"{{fromDate}}\",\n    \"to\": \"{{toDate}}\"\n  }\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Accounting",
+      "item": [
+        {
+          "name": "Account Types",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/accounting/types", "host": ["{{baseUrl}}"], "path": ["api", "accounting", "types"] }
+          }
+        },
+        {
+          "name": "Provider Info",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/accounting/provider", "host": ["{{baseUrl}}"], "path": ["api", "accounting", "provider"] }
+          }
+        },
+        {
+          "name": "Chart of Accounts",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/accounting/accounts?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "accounting", "accounts"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "General Ledger",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/accounting/ledger?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "accounting", "ledger"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Source Detail (by type/ref)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/accounting/source/:sourceType/:sourceRef", "host": ["{{baseUrl}}"], "path": ["api", "accounting", "source", ":sourceType", ":sourceRef"] },
+            "description": "Replace :sourceType (invoice/bill/expense/journal) and :sourceRef with actual IDs."
+          }
+        },
+        {
+          "name": "Audit Trail",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/accounting/audit?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "accounting", "audit"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Ingest Ledger",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/accounting/ingest", "host": ["{{baseUrl}}"], "path": ["api", "accounting", "ingest"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"from\": \"{{fromDate}}\",\n  \"to\": \"{{toDate}}\"\n}" }
+          }
+        },
+        {
+          "name": "Fetch Report by Type",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/accounting/:type?from={{fromDate}}&to={{toDate}}&basis={{basis}}", "host": ["{{baseUrl}}"], "path": ["api", "accounting", ":type"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" },
+              { "key": "basis", "value": "{{basis}}" }
+            ]},
+            "description": "Replace :type with: profitandloss, balancesheet, trialbalance, generalledger, cashflow, aragingsummary, apagingsummary, customerbalance, vendorbalance, etc."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analytics",
+      "item": [
+        {
+          "name": "Rebuild Analytics ETL",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/analytics/rebuild", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "rebuild"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "ETL Status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/etl-status", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "etl-status"] }
+          }
+        },
+        {
+          "name": "Overview",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/overview?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "overview"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Revenue Analytics",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/revenue?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "revenue"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Expense Analytics",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/expense?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "expense"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Cash Flow Analytics",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/cashflow?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "cashflow"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Top Customers",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/top-customers?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "top-customers"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Top Vendors",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/top-vendors?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "top-vendors"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Expense by Category",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/expense-by-category?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "expense-by-category"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "AR Aging",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/ar-aging?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "ar-aging"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "AP Aging",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/ap-aging?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "ap-aging"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Tax Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/analytics/tax-summary?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "analytics", "tax-summary"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customers",
+      "item": [
+        {
+          "name": "List Customers",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/customers", "host": ["{{baseUrl}}"], "path": ["api", "customers"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Vendors",
+      "item": [
+        {
+          "name": "List Vendors",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/vendors", "host": ["{{baseUrl}}"], "path": ["api", "vendors"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "item": [
+        {
+          "name": "All Transactions",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/transactions?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "transactions"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Invoices",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/transactions/invoices?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "transactions", "invoices"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Bills",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/transactions/bills?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "transactions", "bills"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Expenses",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/transactions/expenses?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "transactions", "expenses"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Bank Transactions",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/transactions/bank-transactions?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "transactions", "bank-transactions"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        },
+        {
+          "name": "Account Transactions",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/transactions/account-transactions?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "transactions", "account-transactions"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Day Book",
+      "item": [
+        {
+          "name": "Day Book",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/daybook?from={{fromDate}}&to={{toDate}}", "host": ["{{baseUrl}}"], "path": ["api", "daybook"], "query": [
+              { "key": "from", "value": "{{fromDate}}" },
+              { "key": "to", "value": "{{toDate}}" }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Clients (Admin)",
+      "item": [
+        {
+          "name": "List Clients",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/clients", "host": ["{{baseUrl}}"], "path": ["api", "clients"] }
+          }
+        },
+        {
+          "name": "Create Client",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/clients", "host": ["{{baseUrl}}"], "path": ["api", "clients"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Client Name\",\n  \"email\": \"client@example.com\",\n  \"password\": \"password123\",\n  \"integrationType\": \"xero\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Update Client",
+          "request": {
+            "method": "PUT",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated Name\",\n  \"email\": \"updated@example.com\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete Client",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}"] }
+          }
+        },
+        {
+          "name": "Connect Client — Zoho",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}/connect-zoho", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}", "connect-zoho"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Disconnect Client — Zoho",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}/disconnect-zoho", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}", "disconnect-zoho"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Connect Client — QuickBooks",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}/connect-quickbooks", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}", "connect-quickbooks"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Disconnect Client — QuickBooks",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}/disconnect-quickbooks", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}", "disconnect-quickbooks"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Connect Client — Xero",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}/connect-xero", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}", "connect-xero"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Disconnect Client — Xero",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/clients/{{clientIdParam}}/disconnect-xero", "host": ["{{baseUrl}}"], "path": ["api", "clients", "{{clientIdParam}}", "disconnect-xero"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Search",
+      "item": [
+        {
+          "name": "Global Search",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/search?q=<search_term>", "host": ["{{baseUrl}}"], "path": ["api", "search"], "query": [
+              { "key": "q", "value": "<search_term>", "description": "Search term — customers, vendors, invoices, bills, etc." }
+            ]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sync",
+      "description": "Data sync operations for all platforms. Syncs pull data from the provider API and store in local database.",
+      "item": [
+        {
+          "name": "── Zoho Sync ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Sync All (Zoho)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/all", "host": ["{{baseUrl}}"], "path": ["api", "sync", "all"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Last Sync Status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/last", "host": ["{{baseUrl}}"], "path": ["api", "sync", "last"] }
+          }
+        },
+        {
+          "name": "Sync Day Book",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/daybook", "host": ["{{baseUrl}}"], "path": ["api", "sync", "daybook"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Day Book Live Data",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/daybook/live", "host": ["{{baseUrl}}"], "path": ["api", "sync", "daybook", "live"] }
+          }
+        },
+        {
+          "name": "Sync Account Transactions",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/account-transactions", "host": ["{{baseUrl}}"], "path": ["api", "sync", "account-transactions"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Sync Bank Transactions",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/bank-transactions", "host": ["{{baseUrl}}"], "path": ["api", "sync", "bank-transactions"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Bank Transactions Live Data",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/bank-transactions/live", "host": ["{{baseUrl}}"], "path": ["api", "sync", "bank-transactions", "live"] }
+          }
+        },
+        {
+          "name": "Account Transactions Live Data",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/account-transactions/live", "host": ["{{baseUrl}}"], "path": ["api", "sync", "account-transactions", "live"] }
+          }
+        },
+        {
+          "name": "Test Zoho Connection",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/test/zoho", "host": ["{{baseUrl}}"], "path": ["api", "sync", "test", "zoho"] }
+          }
+        },
+        {
+          "name": "Test Xero Connection",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/test/xero", "host": ["{{baseUrl}}"], "path": ["api", "sync", "test", "xero"] }
+          }
+        },
+        {
+          "name": "Test Bank — Zoho",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/test/bank/zoho", "host": ["{{baseUrl}}"], "path": ["api", "sync", "test", "bank", "zoho"] }
+          }
+        },
+        {
+          "name": "Test Bank — Xero",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/test/bank/xero", "host": ["{{baseUrl}}"], "path": ["api", "sync", "test", "bank", "xero"] }
+          }
+        },
+        {
+          "name": "── QuickBooks Sync ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Sync All (QuickBooks)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/qbo/all", "host": ["{{baseUrl}}"], "path": ["api", "sync", "qbo", "all"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "── Xero Sync ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Sync All (Xero)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/xero/all", "host": ["{{baseUrl}}"], "path": ["api", "sync", "xero", "all"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Xero — Rebuild Ledger",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/xero/ledger/rebuild", "host": ["{{baseUrl}}"], "path": ["api", "sync", "xero", "ledger", "rebuild"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "ZB Warehouse (Zoho)",
+      "description": "Zoho Books warehouse sync — full and incremental data sync per module.",
+      "item": [
+        {
+          "name": "Sync All Modules",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/zb/all", "host": ["{{baseUrl}}"], "path": ["api", "sync", "zb", "all"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Sync Single Module",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/zb/:module", "host": ["{{baseUrl}}"], "path": ["api", "sync", "zb", ":module"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "description": "Replace :module with: invoices, bills, contacts, items, payments, expenses, bank-transfers, journals, etc."
+          }
+        },
+        {
+          "name": "Sync Status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/zb/status", "host": ["{{baseUrl}}"], "path": ["api", "sync", "zb", "status"] }
+          }
+        },
+        {
+          "name": "Watermarks",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/zb/watermarks", "host": ["{{baseUrl}}"], "path": ["api", "sync", "zb", "watermarks"] }
+          }
+        },
+        {
+          "name": "Clear Watermarks",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/api/sync/zb/watermarks", "host": ["{{baseUrl}}"], "path": ["api", "sync", "zb", "watermarks"] }
+          }
+        },
+        {
+          "name": "Warehouse Health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/zb/health", "host": ["{{baseUrl}}"], "path": ["api", "sync", "zb", "health"] }
+          }
+        },
+        {
+          "name": "Row Counts",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/zb/counts", "host": ["{{baseUrl}}"], "path": ["api", "sync", "zb", "counts"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "QB Warehouse (QuickBooks)",
+      "description": "QuickBooks Online warehouse sync — full and incremental data sync per entity.",
+      "item": [
+        {
+          "name": "Sync All Entities",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/qbo-wh/all", "host": ["{{baseUrl}}"], "path": ["api", "sync", "qbo-wh", "all"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Sync Single Entity",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/sync/qbo-wh/entity/:entity", "host": ["{{baseUrl}}"], "path": ["api", "sync", "qbo-wh", "entity", ":entity"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "description": "Replace :entity with: Account, Invoice, Bill, Customer, Vendor, Payment, etc."
+          }
+        },
+        {
+          "name": "Sync Status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/qbo-wh/status", "host": ["{{baseUrl}}"], "path": ["api", "sync", "qbo-wh", "status"] }
+          }
+        },
+        {
+          "name": "Row Counts",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/sync/qbo-wh/counts", "host": ["{{baseUrl}}"], "path": ["api", "sync", "qbo-wh", "counts"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Provider Accounts",
+      "description": "Platform-specific account listings (Zoho, Xero, QuickBooks).",
+      "item": [
+        {
+          "name": "── Zoho Accounts ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Zoho — Accounts",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zoho/accounts", "host": ["{{baseUrl}}"], "path": ["api", "zoho", "accounts"] }
+          }
+        },
+        {
+          "name": "Zoho — Accounts Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/zoho/accounts/summary", "host": ["{{baseUrl}}"], "path": ["api", "zoho", "accounts", "summary"] }
+          }
+        },
+        {
+          "name": "── Xero Accounts ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "Xero — Accounts",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/xero/accounts", "host": ["{{baseUrl}}"], "path": ["api", "xero", "accounts"] }
+          }
+        },
+        {
+          "name": "Xero — Accounts Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/xero/accounts/summary", "host": ["{{baseUrl}}"], "path": ["api", "xero", "accounts", "summary"] }
+          }
+        },
+        {
+          "name": "── QuickBooks Accounts ──",
+          "request": { "method": "GET", "url": { "raw": "Benchmark", "host": [] } }
+        },
+        {
+          "name": "QuickBooks — Accounts",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/quickbooks/accounts", "host": ["{{baseUrl}}"], "path": ["api", "quickbooks", "accounts"] }
+          }
+        },
+        {
+          "name": "QuickBooks — Accounts Summary",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/quickbooks/accounts/summary", "host": ["{{baseUrl}}"], "path": ["api", "quickbooks", "accounts", "summary"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "item": [
+        {
+          "name": "Zoho Webhook Receiver",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/webhooks/zoho", "host": ["{{baseUrl}}"], "path": ["api", "webhooks", "zoho"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"module\": \"invoices\",\n  \"action\": \"created\",\n  \"data\": {}\n}" },
+            "description": "PUBLIC endpoint — no JWT. Provider posts here; authenticity verified via shared secret."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Notifications",
+      "item": [
+        {
+          "name": "List Notifications",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/notifications", "host": ["{{baseUrl}}"], "path": ["api", "notifications"] }
+          }
+        },
+        {
+          "name": "Unread Count",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/notifications/unread-count", "host": ["{{baseUrl}}"], "path": ["api", "notifications", "unread-count"] }
+          }
+        },
+        {
+          "name": "Generate Notifications",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/notifications/generate", "host": ["{{baseUrl}}"], "path": ["api", "notifications", "generate"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Create Notification",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/notifications", "host": ["{{baseUrl}}"], "path": ["api", "notifications"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Notification Title\",\n  \"message\": \"Notification message\",\n  \"type\": \"info\"\n}" }
+          }
+        },
+        {
+          "name": "Mark as Read",
+          "request": {
+            "method": "PATCH",
+            "url": { "raw": "{{baseUrl}}/api/notifications/{{notificationId}}/read", "host": ["{{baseUrl}}"], "path": ["api", "notifications", "{{notificationId}}", "read"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Mark All as Read",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/notifications/read-all", "host": ["{{baseUrl}}"], "path": ["api", "notifications", "read-all"] },
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Delete Notification",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/api/notifications/{{notificationId}}", "host": ["{{baseUrl}}"], "path": ["api", "notifications", "{{notificationId}}"] }
+          }
+        }
+      ]
+    }
+  ]
+}
