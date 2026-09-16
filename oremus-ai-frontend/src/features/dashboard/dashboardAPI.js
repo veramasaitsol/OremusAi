@@ -81,17 +81,17 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
     // ── Revenue + Expense trend ───────────────────────────────────────────────
     const trendMap = {};
     revTrend.forEach(r => {
-      trendMap[r.month] = { rev: Math.round((r.revenue || 0) / 1000), exp: 0 };
+      trendMap[r.month] = { rev: Math.round((r.revenue || 0) ), exp: 0 };
     });
     expTrend.forEach(e => {
-      if (trendMap[e.month]) trendMap[e.month].exp = Math.round((e.expenses || 0) / 1000);
-      else trendMap[e.month] = { rev: 0, exp: Math.round((e.expenses || 0) / 1000) };
+      if (trendMap[e.month]) trendMap[e.month].exp = Math.round((e.expenses || 0) );
+      else trendMap[e.month] = { rev: 0, exp: Math.round((e.expenses || 0) ) };
     });
     const revExp = Object.entries(trendMap)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([month, v]) => ({ m: toMonthLabel(month), rev: v.rev, exp: v.exp, profit: v.rev - v.exp }));
 
-    // ── Profit vs last year (Hero tile green badge) ───────────────────────────
+      // ── Profit vs last year (Hero tile green badge) ───────────────────────────
     // Same calendar window one year back, summed from the same revenue-trend/
     // expense-trend endpoints the chart itself uses — so "vs last year" is
     // never a different data source quietly disagreeing with the total it's
