@@ -246,8 +246,8 @@ function buildConfigs(data, currency = 'INR') {
       benchmarks: [{ value: 0.7, label: '0.7' }, { value: 1, label: '1' }],
       color: colorHigher(1, 0.7)(data.quickRatio),
       fmt: ratio, fmtAxis: ratio,
-      formula: '(Current Assets − Inventory) / Current Liabilities',
-      note: '* GL-based (cash + receivables) / current liabilities — matches the dashboard',
+      formula: '(Cash & Bank + Accounts Receivable) / Current Liabilities',
+      note: '* Quick Assets = Cash & Bank + Accounts Receivable — matches the dashboard',
       interpretations: [
         '> 1: company is sufficiently liquid',
         '< 0.7: company may face liquidity issues',

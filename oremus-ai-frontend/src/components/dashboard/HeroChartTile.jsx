@@ -11,7 +11,7 @@ function fmtFull(v) {
   return fmt(v * 1000);
 }
 
-export default function HeroChartTile({ data = [] }) {
+export default function HeroChartTile({ data = [], lastYearProfit = null }) {
   const totalRev    = data.reduce((s, d) => s + (d.rev || 0), 0);
   const totalExp    = data.reduce((s, d) => s + (d.exp || 0), 0);
   // The period series is zero-filled to span every month, so a period with no
@@ -25,6 +25,14 @@ export default function HeroChartTile({ data = [] }) {
     ? `${latest.m}: ${fmtFull(latest.rev)} rev · ${fmtFull(latest.exp)} exp · ${fmtFull(latest.rev - latest.exp)} profit`
     : 'No data for selected period';
 
+  // Profit gained vs the same period last year. `data`/`totalProfit` are in
+  // thousands (see fmtFull above); lastYearProfit arrives in full rupees from
+  // the same revenue-trend/expense-trend source, shifted back one calendar
+  // year — so convert before comparing. `null` (badge hidden) when the prior
+  // year has no synced data, never a fabricated 0.
+  const hasLastYear = lastYearProfit != null;
+  const yoyGain = hasLastYear ? (totalProfit * 1000) - lastYearProfit : null;
+  const yoyPct  = hasLastYear && lastYearProfit !== 0 ? (yoyGain / Math.abs(lastYearProfit)) * 100 : null;
 
   return (
     <Tile padding="p-0" className="row-span-2 h-full">
@@ -44,6 +52,12 @@ export default function HeroChartTile({ data = [] }) {
                 </div>
               )}
             </div>
+            {totalRev > 0 && hasLastYear && (
+              <div className={`text-[12px] font-medium ${yoyGain >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                {yoyGain >= 0 ? '▲' : '▼'} {fmt(Math.abs(yoyGain))}
+                {yoyPct != null ? ` (${yoyGain >= 0 ? '+' : '−'}${Math.abs(yoyPct).toFixed(1)}%)` : ''} profit vs last year
+              </div>
+            )}
             <div className="text-[12px] text-navy-500 dark:text-navy-300 mt-1">{subtitle}</div>
           </div>
         </div>

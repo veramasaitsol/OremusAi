@@ -444,7 +444,7 @@ export default function Dashboard() {
           <div className={cn('grid grid-cols-12 gap-3 mb-5 transition-opacity duration-200', refreshing && 'opacity-40 pointer-events-none')}>
           {/* Hero chart — 7 cols × 2 rows */}
           <div className="col-span-12 xl:col-span-7 xl:row-span-2">
-            <HeroChartTile data={dash.revExp} />
+            <HeroChartTile data={dash.revExp} lastYearProfit={dash.lastYearProfit} />
           </div>
 
           {/* KPI tiles — 5 cols, 2×2 (fills the hero height, no extra space) */}

@@ -10,6 +10,7 @@ const dashboardSlice = createSlice({
   name: 'dashboard',
   initialState: {
     revExp: [],
+    lastYearProfit: null,
     cashFlow: [],
     kpis: [],
     expenseMix: [],

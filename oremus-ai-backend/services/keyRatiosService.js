@@ -83,13 +83,23 @@ const RE_ACCUM_DEPRECIATION = /accumulated\s*deprecia/i;
 
 // Collapse an aggregateBS() snapshot { assets, liabilities, equity } (each a
 // Map of accountId -> {amount, typeCode, name}) into the scalar totals every
-// ratio needs. ABS() is applied only to Total Assets / Total Current Assets /
-// Total Current Liabilities when they serve as a ratio's "positive base" —
-// the same convention the reference ratio methodology documents (needed
-// because a bank account holding an overdraft posts as a negative balance
-// INSIDE Assets on every platform's export, not as a Liability) — and never
-// to a figure meant to show its true sign as a result (Working Capital, Total
-// Debt, Total Equity).
+// ratio needs. `currentAssets` / `currentLiabilities` use the EXACT SAME
+// account_type_code sets as the Balance Sheet Report's own "Current Assets" /
+// "Current Liabilities" sections (BS_SUBGROUPS in zohoGlReportsService.js),
+// so these figures — and the Liquidity Metrics card that displays them
+// directly — tie out to that report instead of drifting from it:
+//   currentAssets      = accounts_receivable + other_current_asset (NOT bank —
+//                         the Report lists Bank as its own top-level section)
+//   currentLiabilities = accounts_payable + other_current_liability (NOT
+//                         credit_card — the Report buckets that separately;
+//                         it still counts toward `debt` below, just not here)
+// ABS() is applied only to Total Assets / Total Current Assets / Total
+// Current Liabilities when they serve as a ratio's "positive base" — the same
+// convention the reference ratio methodology documents (needed because a bank
+// account holding an overdraft posts as a negative balance INSIDE Assets on
+// every platform's export, not as a Liability) — and never to a figure meant
+// to show its true sign as a result (Working Capital, Total Debt, Total
+// Equity).
 function bsTotals(bs) {
   let bank = 0, ar = 0, otherCurrentAsset = 0, totalAssets = 0, grossFixedAssets = 0;
   for (const { amount, typeCode, name } of bs.assets.values()) {
@@ -105,7 +115,7 @@ function bsTotals(bs) {
     totalLiabilities += amount;
     const tc = (typeCode || '').toLowerCase();
     if (tc === 'accounts_payable') ap += amount;
-    else if (tc === 'other_current_liability' || tc === 'credit_card') otherCurrentLiability += amount;
+    else if (tc === 'other_current_liability') otherCurrentLiability += amount;
     if (tc === 'credit_card' || RE_DEBT_ACCOUNT.test(name || '')) debt += amount;
   }
   // aggregateBS's equity Map holds only PRIOR-year accumulated earnings
@@ -118,7 +128,7 @@ function bsTotals(bs) {
   let totalEquity = num(bs.netIncome);
   for (const { amount } of bs.equity.values()) totalEquity += amount;
 
-  const currentAssets = bank + ar + otherCurrentAsset;
+  const currentAssets = ar + otherCurrentAsset;
   const currentLiabilities = ap + otherCurrentLiability;
   const hasData = bs.assets.size > 0 || bs.liabilities.size > 0 || bs.equity.size > 0;
 
@@ -140,18 +150,24 @@ const avg = (a, b) => (a + b) / 2;
  * and this does NOT replace them). This is the "metrics/ratios" version:
  *   operatingCashFlow = Net Profit + Depreciation − Change in Working Capital
  *   changeInWorkingCapital = (Current Assets − Current Liabilities) this
- *     period-end minus the same at the period's start
+ *     period-end minus the same at the period's start, where Current Assets
+ *     (bsTotals, above) EXCLUDES Cash & Bank — both to match the Balance
+ *     Sheet Report's own "Current Assets" section, and because Cash is the
+ *     figure the cash-flow statement exists to explain: folding its own
+ *     movement into "change in working capital" would net it against itself.
+ *     E.g. a company that earns $100 and collects every rupee of it in cash
+ *     (nothing else moves) would show wcClose − wcOpen = +$100 and
+ *     OCF = 100 + 0 − 100 = 0 if cash were included, even though it generated
+ *     a real $100 of operating cash.
  *   capex = Gross Fixed Assets (cost, before depreciation) this period-end
  *     minus at the period's start — signed, not floored at 0 (a net disposal
  *     period can show negative capex)
  *   freeCashFlow = operatingCashFlow − capex
  *   netChange = Cash & Bank this period-end minus at the period's start —
- *     computed directly, NOT derived from operatingCashFlow/capex. The
- *     Working Capital figure above already includes cash (matching the
- *     reference workbook's own Current-Assets definition), so forcing
- *     netChange = OCF − capex would double-count it; showing them as two
- *     independently-measured figures (same as the reference workbook) is
- *     intentional, not a bug.
+ *     computed directly, NOT derived from operatingCashFlow/capex, so it
+ *     stays a plain, independently-measured fact even though it now
+ *     approximately reconciles with OCF − capex (± financing activity, which
+ *     this module doesn't track separately).
  * `null` for every field when there's no prior-period snapshot to diff
  * against (a brand-new client) — never a fabricated 0.
  */
@@ -237,6 +253,8 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
 
   const totalAssetsCloseAbs = Math.abs(close.totalAssets);
   const totalAssetsOpenAbs = Math.abs(open.totalAssets);
+  // close.currentAssets already excludes Bank & Cash (see bsTotals, above —
+  // matches the Balance Sheet Report's "Current Assets" section).
   const currentAssetsCloseAbs = Math.abs(close.currentAssets);
   const currentLiabilitiesCloseAbs = Math.abs(close.currentLiabilities);
 

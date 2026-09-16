@@ -7,6 +7,18 @@ function toMonthLabel(ym) {
   return new Date(ym + '-01').toLocaleString('en', { month: 'short' });
 }
 
+// Same calendar period one year earlier (2025-04-01..2026-03-31 → 2024-04-01
+// ..2025-03-31), for the Hero tile's "vs last year" comparison. Clamps a
+// Feb-29 boundary to Feb-28 in a non-leap year instead of rolling into March.
+function shiftYearsIso(dateStr, years) {
+  if (!dateStr) return dateStr;
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  const day = d.getUTCDate();
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  if (d.getUTCDate() !== day) d.setUTCDate(0);
+  return d.toISOString().slice(0, 10);
+}
+
 export async function fetchDashboard({ clientId, from, to, basis } = {}) {
   try {
     const params = {};
@@ -14,7 +26,17 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
     if (to)    params.to    = to;
     if (basis) params.basis = basis;
 
-    const [statsRes, revRes, expRes, topCustRes, topVendRes, expBreakRes, cashRes, activityRes, profitRes, complianceRes, ratiosRes] =
+    // Last year's revenue/expense trend, same source as the current period's
+    // (revenue-trend/expense-trend), so the "vs last year" comparison in the
+    // Hero tile is apples-to-apples with the total it's compared against —
+    // not a different totals endpoint that can resolve via a different
+    // provider/sync-state fallback tier and quietly disagree.
+    const lastYearParams = (from && to)
+      ? { ...params, from: shiftYearsIso(from, -1), to: shiftYearsIso(to, -1) }
+      : null;
+    const softEmpty = () => ({ data: { data: [] } });
+
+    const [statsRes, revRes, expRes, topCustRes, topVendRes, expBreakRes, cashRes, activityRes, profitRes, complianceRes, ratiosRes, lastYearRevRes, lastYearExpRes] =
       await Promise.all([
         axiosClient.get('/dashboard',                        { params }),
         axiosClient.get('/dashboard/revenue-trend',          { params }),
@@ -35,6 +57,11 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
         // Ratios page, scoped to this selected period. Soft-fails so a
         // ratios error never blanks the whole dashboard.
         axiosClient.get('/ratios',                            { params }).catch(() => ({ data: { data: {} } })),
+        // Hero tile "vs last year" comparison — soft-fails to an empty trend
+        // (→ lastYearProfit stays null, badge hidden) so a brand-new client
+        // with no prior-year data never blanks the whole dashboard.
+        lastYearParams ? axiosClient.get('/dashboard/revenue-trend', { params: lastYearParams }).catch(softEmpty) : softEmpty(),
+        lastYearParams ? axiosClient.get('/dashboard/expense-trend', { params: lastYearParams }).catch(softEmpty) : softEmpty(),
       ]);
 
     const stats    = statsRes.data.data    ?? {};
@@ -43,6 +70,8 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
     const topCust  = topCustRes.data.data  ?? [];
     const topVend  = topVendRes.data.data  ?? [];
     const expBreak = expBreakRes.data.data ?? [];
+    const lastYearRevTrend = lastYearRevRes.data.data ?? [];
+    const lastYearExpTrend = lastYearExpRes.data.data ?? [];
     const ratios   = ratiosRes.data.data   ?? {};
     const cashData = cashRes.data.data     ?? [];
     const activityData = activityRes.data.data ?? [];
@@ -61,6 +90,17 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
     const revExp = Object.entries(trendMap)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([month, v]) => ({ m: toMonthLabel(month), rev: v.rev, exp: v.exp, profit: v.rev - v.exp }));
+
+    // ── Profit vs last year (Hero tile green badge) ───────────────────────────
+    // Same calendar window one year back, summed from the same revenue-trend/
+    // expense-trend endpoints the chart itself uses — so "vs last year" is
+    // never a different data source quietly disagreeing with the total it's
+    // compared against. `null` (badge hidden) when the prior year has no
+    // synced data at all, not a fabricated 0.
+    const lastYearRevenue  = lastYearRevTrend.reduce((s, r) => s + (r.revenue  || 0), 0);
+    const lastYearExpenses = lastYearExpTrend.reduce((s, e) => s + (e.expenses || 0), 0);
+    const hasLastYearData  = lastYearRevenue !== 0 || lastYearExpenses !== 0;
+    const lastYearProfit   = hasLastYearData ? (lastYearRevenue - lastYearExpenses) : null;
 
     // ── Cash flow ─────────────────────────────────────────────────────────────
     const cashFlow = cashData.length > 0
@@ -184,6 +224,7 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
 
     return {
       revExp,
+      lastYearProfit,
       cashFlow,
       kpis,
       expenseMix,

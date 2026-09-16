@@ -684,10 +684,15 @@ async function buildBalanceSheet(userId, params = {}) {
     return cells;
   };
 
+  // Multi-period (e.g. "Compare Previous Year"): one column per period only —
+  // no trailing "Total" column. That column used to show the Trial-Balance
+  // Closing Balance (cells.closing, still computed below for anything else
+  // that reads it), but next to two period columns it reads as a confusing
+  // third value rather than a sum of them, so it's dropped from the rendered/
+  // exported column set here.
   const columns = multi
     ? [{ key: 'label', label: 'Account', align: 'left' },
-       ...periods.map((p, i) => ({ key: colKey(i), label: p.label, align: 'right' })),
-       { key: 'closing', label: 'Total', align: 'right' }]
+       ...periods.map((p, i) => ({ key: colKey(i), label: p.label, align: 'right' }))]
     : [{ key: 'label', label: 'Account', align: 'left' },
        // Single value column, labelled "Total": the standard balance-sheet
        // presentation (assets, liabilities and equity all shown positive).

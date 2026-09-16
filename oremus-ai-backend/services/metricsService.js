@@ -438,8 +438,17 @@ async function localPL(provider, effUserId, connRef, from, to) {
     // The old approach summed only gross credits/debits which overstated
     // revenue/expenses when accounts had opposite-side postings (refunds, etc).
     try {
-      const { computePLFigures } = require('./zohoLedgerReportsService');
-      const figures = await computePLFigures(effUserId, connRef, null, from, to);
+      const { computePLFigures, extractPLLineItems } = require('./zohoLedgerReportsService');
+      // Depreciation/Interest/Tax are leaf-account line items, not part of
+      // computePLFigures's bucket totals — extractPLLineItems reads them from
+      // the SAME aggregatePL buckets (never drifts from the P&L Report), and
+      // is what feeds EBITDA (Operating Profit + Depreciation) below via
+      // getProfitabilityMetrics. Previously hardcoded to 0 here, which made
+      // EBITDA silently collapse to Operating Profit for every Zoho client.
+      const [figures, pli] = await Promise.all([
+        computePLFigures(effUserId, connRef, null, from, to),
+        extractPLLineItems(effUserId, connRef, from, to),
+      ]);
       return {
         provider,
         revenue: figures.revenue,
@@ -449,9 +458,9 @@ async function localPL(provider, effUserId, connRef, from, to) {
         opex: figures.opex,
         operatingProfit: figures.operatingProfit,
         otherExpense: figures.otherExpense,
-        interest: 0,
-        tax: 0,
-        depreciation: 0,
+        interest: pli.interestExpense,
+        tax: pli.incomeTax,
+        depreciation: pli.depreciation,
         netProfit: figures.netProfit,
       };
     } catch (_) {
