@@ -8,8 +8,6 @@ require('dotenv').config({
 const express = require('express');
 const cors    = require('cors');
 
-const aiQueryRoutes = require('./routes/aiQuery')
-const aiFeedbackRoutes = require('./routes/aiFeedback')
 const authRoutes         = require('./routes/auth');
 const dashboardRoutes    = require('./routes/dashboard');
 const metricsRoutes      = require('./routes/metrics');
@@ -57,11 +55,6 @@ const ALLOWED_ORIGINS = [
   'https://daybook.vensframe.com',          // standalone Day Book app (prod)
   'https://www.daybook.vensframe.com',
   'https://oremusai.veramasa.com',
-  'https://oremusui.vensframe.com',
-  'http://122.175.56.137:8000/api/v1/query',
-  'http://122.175.56.137:8000',
-  'https://122.175.56.137:8000/api/v1/query',
-  'https://122.175.56.137:8000',
 
   ...(process.env.DAYBOOK_URL ? [process.env.DAYBOOK_URL] : []),
   ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
@@ -118,8 +111,7 @@ app.use('/api/settings',     settingsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 // PUBLIC (no JWT — providers post here; authenticity via shared secret).
 app.use('/api/webhooks',     webhooksRoutes);
-app.use('/api/v1', aiQueryRoutes);
-app.use('/api/v1', aiFeedbackRoutes);
+
 // ── Health check ───────────────────────────────────────────────────────────────
 app.get('/api/health', async (_req, res) => {
   try {
