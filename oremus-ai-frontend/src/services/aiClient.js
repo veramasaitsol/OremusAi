@@ -18,15 +18,128 @@ export function formatAIPlatform(platform) {
 // backend), so it uses a dedicated axios call rather than the shared client.
 // Override the base via VITE_AI_API_URL in the .env file if the host changes.
 
-// POST /query { platform, question } → AI answer.
+// ─────────────────────────────────────────────────────────────────────────────
+// Response normalization
+//
+// The on-premise AI service answers POST /query with:
+// {
+//   "data":          "<div>5814.189617</div>",   ← answer, HTML-wrapped
+//   "generated_sql": "SELECT AVG(invoices.balance) AS result FROM invoices",
+//   "meta":          { "execution_time_ms": 10895.95, "db_execution_time_ms": 71.44 },
+//   "query_params":  {},
+//   "status":        "SUCCESS",
+//   "success":       true
+// }
+//
+// The UI renders `answer` (narrative), `data` (row array for tables) and `sql`,
+// so normalizeAIResponse() maps the wire shape onto that. `data` may also be a
+// full HTML <table> for row-set answers — those rows are extracted so the UI's
+// table/chart rendering works unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Pull rows + narrative text out of an HTML payload. Two quirks handled:
+// 1) Fragments like "<tr><td>…</td></tr>" (no <table> wrapper) are invalid
+//    standalone HTML, and DOMParser silently STRIPS those tags — every cell
+//    then concatenates into one unreadable blob ("iduser_idorg_id…").
+//    Wrapping such fragments in <table>…</table> preserves the structure.
+// 2) The narrative answer must not repeat the table's own cell text.
+function parseHtmlPayload(html) {
+  const stripTags = (s) => s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  const hasTable = /<table[\s>]/i.test(html);
+  const isFragment = !hasTable && /<(tr|td|th|tbody|thead)[\s>]/i.test(html);
+  const source = isFragment ? `<table>${html}</table>` : html;
+
+  let doc;
+  try {
+    doc = new DOMParser().parseFromString(source, 'text/html');
+  } catch {
+    return { text: stripTags(html), rows: null };
+  }
+
+  const fullText = (doc.documentElement.textContent || '').replace(/\s+/g, ' ').trim();
+  let rows = null;
+  let text = fullText;
+
+  const table = doc.querySelector('table');
+  if (table) {
+    const trs = Array.from(table.querySelectorAll('tr')).filter((tr) => tr.children.length);
+    if (trs.length >= 2) {
+      const headers = Array.from(trs[0].children).map((c, i) => (c.textContent || '').trim() || `col_${i + 1}`);
+      rows = trs.slice(1).map((tr) => {
+        const row = {};
+        Array.from(tr.children).forEach((c, i) => {
+          row[headers[i] || `col_${i + 1}`] = (c.textContent || '').trim();
+        });
+        return row;
+      }).filter((r) => Object.keys(r).length);
+      // Narrative = text living OUTSIDE the table (e.g. "<div>5814.19</div>",
+      // or a sentence beside it) so table cells never double up as prose.
+      const outside = doc.documentElement.cloneNode(true);
+      outside.querySelectorAll('table').forEach((t) => t.remove());
+      text = (outside.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  return { text, rows: rows && rows.length ? rows : null };
+}
+
+// Wire shape (or legacy shapes) → { answer, data: rows|null, sql, timing, success }.
+export function normalizeAIResponse(raw) {
+  if (raw == null) return { answer: '', data: null, sql: '', executionTimeMs: null, dbTimeMs: null, success: false };
+  if (typeof raw === 'string') {
+    return { answer: parseHtmlPayload(raw).text, data: null, sql: '', executionTimeMs: null, dbTimeMs: null, success: true };
+  }
+
+  const out = { ...raw };
+
+  if (typeof raw.data === 'string') {
+    // HTML-wrapped answer (the service's current format).
+    const { text, rows } = parseHtmlPayload(raw.data);
+    out.answer = raw.answer ?? text;
+    out.data = rows; // null unless the HTML contained a <table>
+  } else if (Array.isArray(raw.data)) {
+    out.data = raw.data; // already a row set
+  } else {
+    out.data = null;
+  }
+
+  if (out.answer == null) out.answer = extractAnswer(raw);
+  out.sql = raw.sql ?? raw.generated_sql ?? '';
+  out.executionTimeMs = raw.meta?.execution_time_ms ?? raw.executionTimeMs ?? null;
+  out.dbTimeMs = raw.meta?.db_execution_time_ms ?? null;
+  // Only an EXPLICIT failure marks the answer as failed. A missing success AND
+  // missing status (legacy shapes) must stay truthy or old payloads would break.
+  const status = raw.status != null ? String(raw.status).toUpperCase() : null;
+  out.success = raw.success != null ? Boolean(raw.success) : (status != null ? status === 'SUCCESS' : true);
+  return out;
+}
+
+// POST /query { platform, question } → normalized AI answer.
+// The service's `success` flag gates the result: only a successful response is
+// returned as an answer; a failed one throws (with the service's reason) so the
+// chat surfaces show their error bubble instead of an answer card.
 export async function askAI({ platform, question }) {
   const payloadPlatform = formatAIPlatform(platform);
   const { data } = await axios.post(
     `${AI_BASE}/query`,
     { platform: payloadPlatform, question },
-    { headers: { 'Content-Type': 'application/json' }, timeout: 60000 },
+    { headers: { 'Content-Type': 'application/json' }, timeout: 120000 },
   );
-  return data;
+  const normalized = normalizeAIResponse(data);
+  if (!normalized.success) {
+    // Failed response → surface the service's own STATUS value first (e.g.
+    // "FAILED", "NO_SQL"), followed by its reason text when one is provided.
+    const status = String(data?.status ?? normalized.status ?? 'FAILED');
+    const detail = [normalized.answer, data?.error, data?.message]
+      .find((s) => typeof s === 'string' && s.trim());
+    const detailText = detail
+      ? (detail.length > 300 ? `${detail.slice(0, 300)}…` : detail)
+      : '';
+    const err = new Error(detailText ? `Status: ${status} — ${detailText}` : `Status: ${status}`);
+    err.aiResponse = normalized;
+    throw err;
+  }
+  return normalized;
 }
 
 // The /query response shape isn't strictly fixed — pull the human-readable
