@@ -406,6 +406,7 @@ export default function Analytics() {
   const [loading, setLoading] = useState(false);
   const [railOpen, setRailOpen] = useState(false); // mobile history drawer
   const [popup, setPopup] = useState(null); // post-answer feedback popup
+  const [copiedUser, setCopiedUser] = useState(null); // which user msg was copied
   const scrollRef = useRef(null);
 
   const active = convos.find((c) => c.id === activeId) || null;
@@ -635,8 +636,20 @@ export default function Analytics() {
                       </div>
                     )}
                     {m.role === 'user' ? (
-                      <div className="max-w-[80%] rounded-2xl rounded-br-md bg-gradient-to-br from-brand-500 to-brand-700 text-white px-4 py-2.5 text-[13.5px] leading-snug shadow-card">
-                        {m.text}
+                      <div className="group max-w-[80%] rounded-2xl rounded-br-md bg-gradient-to-br from-brand-500 to-brand-700 text-white px-4 py-2.5 text-[13.5px] leading-snug shadow-card">
+                        <div>{m.text}</div>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(m.text);
+                            setCopiedUser(i);
+                            setTimeout(() => setCopiedUser(null), 1500);
+                          }}
+                          className="mt-1.5 -mb-0.5 flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-white/60 hover:text-white transition"
+                          title="Copy question"
+                        >
+                          {copiedUser === i ? <Check size={11} className="text-emerald-300" /> : <Copy size={11} />}
+                          <span>{copiedUser === i ? 'Copied' : 'Copy'}</span>
+                        </button>
                       </div>
                     ) : m.role === 'error' ? (
                       <div className="max-w-[90%] rounded-2xl rounded-tl-md bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-300 border border-red-100 dark:border-red-500/20 px-4 py-2.5 text-[13.5px] leading-snug">
