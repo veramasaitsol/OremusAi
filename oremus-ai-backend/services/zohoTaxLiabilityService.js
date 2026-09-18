@@ -122,7 +122,7 @@ const family = (n) => String(n).replace(/[\d.]+$/, '');
 // Shared row/Total rendering for every platform's levy map — each entry is
 // { taxId, name, pct, taxable, tax }, with pct/taxable nullable where the
 // figure genuinely can't be traced (renders blank, never a guess).
-function renderLevies(levies, { currency, from, to, source, statuses }) {
+function renderLevies(levies, { currency, from, to, source, statuses, othersAmount = 0 }) {
   const ordered = [...levies.values()].sort(
     (a, b) => family(a.name).localeCompare(family(b.name)) || (a.pct ?? Infinity) - (b.pct ?? Infinity)
   );
@@ -154,6 +154,21 @@ function renderLevies(levies, { currency, from, to, source, statuses }) {
         taxAmount: lv.tax,
       },
     });
+  }
+
+  // Add "Others" row if non-zero (manual transactions in Tax Payable account)
+  if (Math.abs(othersAmount) > 0.005) {
+    rows.push({
+      label: '',
+      cells: {
+        taxName: 'Others (Manual transactions in Tax Payable account)',
+        taxPercent: '',
+        status: '',
+        taxable: null,
+        taxAmount: othersAmount,
+      },
+    });
+    total = round2(total + othersAmount);
   }
 
   if (rows.length) {
@@ -478,7 +493,41 @@ async function buildTaxLiability(userId, params = {}) {
     }
   }
 
-  return renderLevies(levies, { currency, from, to, source: 'warehouse', statuses });
+  // Query for "Others" — manual transactions in Tax Payable accounts
+  const [otherTaxRows] = await pool.execute(
+    `SELECT ROUND(SUM(credit - debit), 2) AS net_tax
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ?
+        AND (
+          LOWER(TRIM(account_name)) IN ('tax payable', 'tax payable account')
+          OR account_type_code = 'tax_payable'
+          OR (
+            (LOWER(account_name) LIKE '%cgst%' 
+             OR LOWER(account_name) LIKE '%sgst%' 
+             OR LOWER(account_name) LIKE '%igst%')
+            AND (source_type = 'journal' OR transaction_type = 'journal')
+          )
+          OR (
+            (source_type = 'bill' OR transaction_type = 'bill')
+            AND (LOWER(account_name) LIKE '%input igst%' 
+                 OR LOWER(account_name) LIKE '%input cgst%' 
+                 OR LOWER(account_name) LIKE '%input sgst%')
+            AND transaction_id COLLATE utf8mb4_unicode_ci NOT IN (
+              SELECT DISTINCT zoho_bill_id COLLATE utf8mb4_unicode_ci
+              FROM zb_bill_line_items 
+              WHERE user_id = account_transactions.user_id 
+                AND (COALESCE(tax_id, '') <> '' OR COALESCE(tax_name, '') <> '')
+            )
+          )
+        )
+        AND transaction_date >= ?
+        AND transaction_date <= ?
+        AND transaction_id NOT LIKE 'xero-recon:%'`,
+    [userId, orgId, from, to + ' 23:59:59']
+  );
+  const othersAmount = round2(num(otherTaxRows[0]?.net_tax));
+
+  return renderLevies(levies, { currency, from, to, source: 'warehouse', statuses, othersAmount });
 }
 
 module.exports = { buildTaxLiability };
