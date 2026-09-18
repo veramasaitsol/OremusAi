@@ -409,7 +409,8 @@ async function writeDoc(conn, { userId, orgId, sourceType, sourceId, date, ref, 
          reference_number=VALUES(reference_number), debit=VALUES(debit), credit=VALUES(credit),
          balance=VALUES(balance), balance_type=VALUES(balance_type),
          source_type=VALUES(source_type), source_id=VALUES(source_id), line_number=VALUES(line_number),
-         tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount), currency_code=VALUES(currency_code),
+         tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount),
+         currency_code=COALESCE(VALUES(currency_code), currency_code),
          synced_at=NOW()`,
       [
         userId, String(orgId), txnId, String(acctId), (ln._date || date),
@@ -442,6 +443,19 @@ async function buildStagingLedger(userId, opts = {}) {
   if (!auth) throw new Error('Xero not connected for this user');
   const orgId = auth.tenantId;
   const accounts = await loadAccounts(userId);
+
+  // Org's own base currency — used ONLY as the fallback for document types
+  // Xero itself never lets carry a foreign currency (ManualJournal, Bank
+  // Transfers), or where the source object doesn't expose one directly
+  // (Payments settle in their linked Invoice's currency; that Invoice is
+  // already synced with its own real CurrencyCode). Never substituted for a
+  // document that DOES carry its own currency (Invoices/CreditNotes/Bank
+  // Transactions already pass their real CurrencyCode below).
+  const [[orgRow]] = await pool.execute(
+    'SELECT currency FROM xero_organizations WHERE user_id = ? AND tenant_id = ? LIMIT 1',
+    [userId, String(orgId)]
+  ).catch(() => [[null]]);
+  const homeCurrency = orgRow?.currency || null;
 
   const stats = {};
   const errors = {};
@@ -541,9 +555,14 @@ async function buildStagingLedger(userId, opts = {}) {
         if (!posts('manualjournal', mj.Status)) continue; // skip DRAFT/VOIDED/DELETED
         const built = balance(buildManualJournalLines(mj, accounts), accounts.rounding);
         // eslint-disable-next-line no-await-in-loop
+        // Xero's ManualJournal has no CurrencyCode field of its own — manual
+        // journals always post in the org's base currency (Xero doesn't offer
+        // a foreign-currency option for them), so the org's own currency is
+        // the correct value here, not a guess.
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: 'ManualJournal', sourceId: mj.ManualJournalID,
           date: toDate(mj.Date), ref: mj.Narration, details: mj.Narration,
+          currency: homeCurrency,
         }, built);
       }
       stats.manualjournals = { docs: mjs.length, lines };
@@ -557,10 +576,14 @@ async function buildStagingLedger(userId, opts = {}) {
         if (!built.length) continue;
         posted += 1;
         // eslint-disable-next-line no-await-in-loop
+        // A Payment settles in the currency of the Invoice/CreditNote it's
+        // applied to — use that document's own CurrencyCode; only fall back
+        // to the org's base currency for the rare payment with no linked
+        // Invoice context available here.
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: p.PaymentType || 'Payment', sourceId: p.PaymentID,
           date: toDate(p.Date), ref: p.Reference || p.Invoice?.InvoiceNumber,
-          details: p.Invoice?.Contact?.Name, currency: undefined,
+          details: p.Invoice?.Contact?.Name, currency: p.Invoice?.CurrencyCode || homeCurrency,
         }, built);
       }
       stats.payments = { docs: pays.length, posted, lines };
@@ -572,9 +595,12 @@ async function buildStagingLedger(userId, opts = {}) {
         const built = buildBankTransferLines(bt, accounts);
         if (!built.length) continue;
         // eslint-disable-next-line no-await-in-loop
+        // A transfer between two of the org's own bank accounts — Xero has no
+        // per-transfer CurrencyCode; the org's base currency is correct here.
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: 'BankTransfer', sourceId: bt.BankTransferID,
           date: toDate(bt.Date), ref: bt.Reference, details: null,
+          currency: homeCurrency,
         }, built);
       }
       stats.banktransfers = { docs: xfers.length, lines };
@@ -663,6 +689,16 @@ async function trueUpFromTrialBalance(userId, orgId) {
   try { creds = await getValidXeroToken(userId); }
   catch (e) { console.warn('[Xero true-up] no valid token:', e.message); return { adjusted: 0, skipped: true }; }
   const { accessToken, tenantId } = creds;
+
+  // These plug rows aren't any single real transaction — they're a synthetic
+  // per-account correction against Xero's own Trial Balance (which is itself
+  // reported in the org's base currency), so the org's base currency is the
+  // correct value, not a per-transaction lookup.
+  const [[orgRow]] = await pool.execute(
+    'SELECT currency FROM xero_organizations WHERE user_id = ? AND tenant_id = ? LIMIT 1',
+    [userId, String(orgId)]
+  ).catch(() => [[null]]);
+  const homeCurrency = orgRow?.currency || null;
 
   // As-at = latest posted Xero date (so the current BS reconciles exactly).
   const [[{ maxd, mind }]] = await pool.execute(
@@ -781,16 +817,16 @@ async function trueUpFromTrialBalance(userId, orgId) {
          (user_id, org_id, platform, transaction_id, account_id, transaction_date,
           account_name, account_group, account_type_code, transaction_details,
           transaction_type, transaction_number, reference_number,
-          debit, credit, balance, balance_type, source_type, line_number, synced_at)
+          debit, credit, balance, balance_type, source_type, line_number, currency_code, synced_at)
        VALUES (?, ?, 'xero', ?, ?, ?, ?, ?, ?, 'Xero Trial Balance true-up',
-          'Reconciliation', '0', NULL, ?, ?, 0, ?, ?, 0, NOW())
+          'Reconciliation', '0', NULL, ?, ?, 0, ?, ?, 0, ?, NOW())
        ON DUPLICATE KEY UPDATE
           transaction_date=VALUES(transaction_date), account_name=VALUES(account_name),
           account_group=VALUES(account_group), account_type_code=VALUES(account_type_code),
           debit=VALUES(debit), credit=VALUES(credit), balance_type=VALUES(balance_type),
-          synced_at=NOW()`,
+          currency_code=COALESCE(VALUES(currency_code), currency_code), synced_at=NOW()`,
       [userId, String(orgId), `${SRC}:${id}`, String(id), openingDate,
-       name, group, typeCode, debit, credit, debit >= credit ? 'D' : 'C', SRC]
+       name, group, typeCode, debit, credit, debit >= credit ? 'D' : 'C', SRC, homeCurrency]
     );
     adjusted += 1;
   }
@@ -819,14 +855,15 @@ async function trueUpFromTrialBalance(userId, orgId) {
        (user_id, org_id, platform, transaction_id, account_id, transaction_date,
         account_name, account_group, account_type_code, transaction_details,
         transaction_type, transaction_number, reference_number,
-        debit, credit, balance, balance_type, source_type, line_number, synced_at)
+        debit, credit, balance, balance_type, source_type, line_number, currency_code, synced_at)
      VALUES (?, ?, 'xero', 'xero-recon:__residual__', '__xero_recon_residual__', ?,
         'Reconciliation Rounding', 'equity', 'equity', 'Xero Trial Balance true-up residual',
-        'Reconciliation', '0', NULL, ?, ?, 0, ?, 'xero-recon', 0, NOW())
+        'Reconciliation', '0', NULL, ?, ?, 0, ?, 'xero-recon', 0, ?, NOW())
      ON DUPLICATE KEY UPDATE
         transaction_date=VALUES(transaction_date), debit=VALUES(debit),
-        credit=VALUES(credit), balance_type=VALUES(balance_type), synced_at=NOW()`,
-    [userId, String(orgId), openingDate, rDebit, rCredit, rDebit >= rCredit ? 'D' : 'C']
+        credit=VALUES(credit), balance_type=VALUES(balance_type),
+        currency_code=COALESCE(VALUES(currency_code), currency_code), synced_at=NOW()`,
+    [userId, String(orgId), openingDate, rDebit, rCredit, rDebit >= rCredit ? 'D' : 'C', homeCurrency]
   );
   if (Math.abs(residual) > 0.005) adjusted += 1;
 

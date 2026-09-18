@@ -617,6 +617,48 @@ async function syncJournalEntries(userId, accessToken, realmId, environment) {
 // off our DB — NO live QBO Reports call at report time. This REPLACES
 // syncJournalEntries: the GL report is a superset that already includes manual
 // journal entries, so running both would double-count.
+//
+// The GeneralLedger report carries no currency column at all, so a row's own
+// transaction currency has to be looked up from the source document it came
+// from — which every row already identifies via source_type/source_id (the
+// report's own "Transaction Type" + entity id). QBO_GL_TYPE_TO_ENTITY maps the
+// report's display type string to the Query API entity name needed for that
+// lookup; buildQboCurrencyMap fetches each entity type referenced (only the
+// types actually present in this report) and keeps just {Id, CurrencyRef}.
+const QBO_GL_TYPE_TO_ENTITY = {
+  'Journal Entry':               'JournalEntry',
+  'Bill':                        'Bill',
+  'Invoice':                     'Invoice',
+  'Payment':                     'Payment',
+  'Bill Payment (Check)':        'BillPayment',
+  'Bill Payment (Credit Card)':  'BillPayment',
+  'Expense':                     'Purchase',
+  'Check':                       'Purchase',
+  'Credit Card Expense':         'Purchase',
+  'Deposit':                     'Deposit',
+  'Transfer':                    'Transfer',
+  'Credit Memo':                 'CreditMemo',
+  'Vendor Credit':               'VendorCredit',
+  'Sales Receipt':               'SalesReceipt',
+  'Refund Receipt':              'RefundReceipt',
+};
+
+async function buildQboCurrencyMap(realmId, accessToken, environment, neededEntities) {
+  const map = {}; // `${entity}:${id}` -> currency code (e.g. 'USD', 'EUR')
+  await Promise.all([...neededEntities].map(async (entity) => {
+    try {
+      const items = await fetchAllEntities(realmId, accessToken, environment, entity);
+      for (const item of items) {
+        const code = item.CurrencyRef?.value;
+        if (code && item.Id != null) map[`${entity}:${item.Id}`] = code;
+      }
+    } catch (e) {
+      console.warn(`[QBO currency map] ${entity} fetch failed:`, e.response?.data?.Fault?.Error?.[0]?.Message || e.message);
+    }
+  }));
+  return map;
+}
+
 async function syncGeneralLedger(userId, accessToken, realmId, environment) {
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const qboReports = require('./quickbooksReportsService');
@@ -647,6 +689,23 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
   for (const [id, m] of Object.entries(acctMap)) classMap[id] = m.normalSide;
   qboReports.applyGlNormalSides(gl, classMap);
 
+  // 2.5) Per-row transaction currency (see QBO_GL_TYPE_TO_ENTITY above) — only
+  // fetch the entity types this report actually references. Falls back to the
+  // company's own home currency ONLY when a row's source document can't be
+  // matched to one (e.g. Transfers, which QBO doesn't tag with a CurrencyRef
+  // at all) — never substituted for a row whose document DOES carry a currency.
+  const typesPresent = new Set();
+  for (const r of gl.rows) {
+    const entity = QBO_GL_TYPE_TO_ENTITY[r.cells?.type || r.sourceType];
+    if (entity) typesPresent.add(entity);
+  }
+  const currencyMap = await buildQboCurrencyMap(realmId, accessToken, environment, typesPresent);
+  const [[orgRow]] = await pool.execute(
+    'SELECT currency FROM qbo_organizations WHERE user_id = ? AND realm_id = ? LIMIT 1',
+    [userId, String(realmId)]
+  ).catch(() => [[null]]);
+  const homeCurrency = orgRow?.currency || null;
+
   // 3) Replace existing GL lines (KEEP the AccountBalance snapshot rows from
   //    syncAccounts — they carry transaction_date = NULL / debit = credit = 0 so
   //    the sum-based builders ignore them) and insert the fresh ledger.
@@ -672,6 +731,10 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
       if (debit === 0 && credit === 0) continue;
       const acct  = acctMap[ref] || {};
       const txnId = r.sourceRef ? `qbo:${r.sourceRef}` : `qbo:gl:${idx}`;
+      const glType = r.cells?.type || r.sourceType || null;
+      const glEntity = QBO_GL_TYPE_TO_ENTITY[glType];
+      const currencyCode =
+        (glEntity && r.sourceRef != null && currencyMap[`${glEntity}:${r.sourceRef}`]) || homeCurrency || null;
       await conn.execute(
         `INSERT INTO account_transactions
            (user_id, org_id, platform, transaction_id, account_id, transaction_date,
@@ -685,18 +748,18 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
           acct.name || r.cells?.account || null,
           acct.group || null, acct.code || null,
           r.cells?.memo || r.cells?.name || null,
-          r.cells?.type || r.sourceType || 'GeneralLedger',
+          glType || 'GeneralLedger',
           String(idx),
           r.cells?.docnum || null,
           debit, credit,
           round2(r.cells?.balance != null ? r.cells.balance : debit - credit),
           debit >= credit ? 'D' : 'C',
-          r.cells?.type || r.sourceType || null,
+          glType,
           r.sourceRef || null,
           idx,
           null,
           0,
-          null,
+          currencyCode,
         ]
       );
       idx += 1; n += 1;

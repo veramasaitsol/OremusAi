@@ -1764,4 +1764,5 @@ module.exports = {
   fetchComparativeReport,
   listReportTypes,
   REPORT_DEFS,
+  getOrgCurrency,
 };
