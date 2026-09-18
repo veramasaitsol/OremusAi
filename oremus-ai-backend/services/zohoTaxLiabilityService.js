@@ -122,7 +122,7 @@ const family = (n) => String(n).replace(/[\d.]+$/, '');
 // Shared row/Total rendering for every platform's levy map — each entry is
 // { taxId, name, pct, taxable, tax }, with pct/taxable nullable where the
 // figure genuinely can't be traced (renders blank, never a guess).
-function renderLevies(levies, { currency, from, to, source, statuses, othersAmount = 0 }) {
+function renderLevies(levies, { currency, from, to, source, statuses, othersAmount = 0, othersBreakdown = [] }) {
   const ordered = [...levies.values()].sort(
     (a, b) => family(a.name).localeCompare(family(b.name)) || (a.pct ?? Infinity) - (b.pct ?? Infinity)
   );
@@ -173,9 +173,12 @@ function renderLevies(levies, { currency, from, to, source, statuses, othersAmou
         taxable: null,
         taxAmount: othersAmount,
       },
+      breakdown: othersBreakdown.length ? othersBreakdown : undefined,
+      breakdownCount: othersBreakdown.length || undefined,
     });
     total = round2(total + othersAmount);
   }
+
 
   if (rows.length) {
     // Totals the tax collected only — the taxable amounts belong to
@@ -587,8 +590,9 @@ async function buildTaxLiability(userId, params = {}) {
   }
 
   // Query for "Others" — manual transactions in Tax Payable accounts
-  const [otherTaxRows] = await pool.execute(
-    `SELECT ROUND(SUM(credit - debit), 2) AS net_tax
+  const [otherRows] = await pool.execute(
+    `SELECT transaction_date, reference_number, transaction_number, 
+            source_type, transaction_type, debit, credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND (
@@ -615,12 +619,26 @@ async function buildTaxLiability(userId, params = {}) {
         )
         AND transaction_date >= ?
         AND transaction_date <= ?
-        AND transaction_id NOT LIKE 'xero-recon:%'`,
+        AND transaction_id NOT LIKE 'xero-recon:%'
+      ORDER BY transaction_date DESC`,
     [userId, orgId, from, to + ' 23:59:59']
   );
-  const othersAmount = round2(num(otherTaxRows[0]?.net_tax));
 
-  return renderLevies(levies, { currency, from, to, source: 'warehouse', statuses, othersAmount });
+  let othersAmount = 0;
+  const othersBreakdown = [];
+  for (const r of otherRows) {
+    const net = round2(num(r.credit) - num(r.debit));
+    if (net === 0) continue;
+    othersAmount = round2(othersAmount + net);
+    othersBreakdown.push({
+      date: r.transaction_date ? String(r.transaction_date).slice(0, 10) : null,
+      ref: r.transaction_number || r.reference_number || '–',
+      type: r.transaction_type === 'journal' || r.source_type === 'journal' ? 'Journal' : 'Bill',
+      txnAmount: null,
+      amount: net,
+    });
+  }
+  return renderLevies(levies, { currency, from, to, source: 'warehouse', statuses, othersAmount, othersBreakdown});
 }
 
 module.exports = { buildTaxLiability };

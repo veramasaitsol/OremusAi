@@ -670,7 +670,7 @@ export default function Analytics() {
                           )}
                         />
                         {/* Follow-up chips */}
-                        <div className="flex flex-wrap gap-2 mt-5 pt-4 border-t border-navy-100 dark:border-navy-800">
+                        {/* <div className="flex flex-wrap gap-2 mt-5 pt-4 border-t border-navy-100 dark:border-navy-800">
                           {FOLLOW_UPS.map((chip) => (
                             <button
                               key={chip}
@@ -681,7 +681,7 @@ export default function Analytics() {
                               {chip}
                             </button>
                           ))}
-                        </div>
+                        </div> */}
                       </div>
                     )}
                   </div>
