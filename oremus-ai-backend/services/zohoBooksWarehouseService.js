@@ -1211,16 +1211,28 @@ async function syncCreditNotes(userId, accessToken, orgId, runId) {
           toMysqlDt(c.created_time), toMysqlDt(c.last_modified_time),
         ]
       );
+      // Isolated from the line-items write below: a failure here (e.g. the
+      // zb_credit_note_invoices table missing on a DB that hasn't picked up
+      // the latest migration) must never skip the line items, which is what
+      // the Tax Liability report's creditDocs join actually depends on.
       if (Array.isArray(c.invoices_credited)) {
         for (const i of c.invoices_credited) {
-          await pool.execute(
-            `INSERT INTO zb_credit_note_invoices
-               (user_id, org_id, zoho_creditnote_id, zoho_invoice_id, invoice_number, amount_applied, apply_date)
-             VALUES (?,?,?,?,?,?,?)
-             ON DUPLICATE KEY UPDATE amount_applied=VALUES(amount_applied)`,
-            [userId, orgId, str(c.creditnote_id, 100), str(i.invoice_id, 100),
-             str(i.invoice_number, 100), num(i.amount_applied), toMysqlDate(i.apply_date)]
-          );
+          try {
+            // Zoho's creditnote.invoices_credited entries use `credited_amount`
+            // and `date` — not `amount_applied`/`apply_date` (those don't exist
+            // on this payload; the old field names always resolved to
+            // undefined, silently writing 0 / NULL).
+            await pool.execute(
+              `INSERT INTO zb_credit_note_invoices
+                 (user_id, org_id, zoho_creditnote_id, zoho_invoice_id, invoice_number, amount_applied, apply_date)
+               VALUES (?,?,?,?,?,?,?)
+               ON DUPLICATE KEY UPDATE amount_applied=VALUES(amount_applied)`,
+              [userId, orgId, str(c.creditnote_id, 100), str(i.invoice_id, 100),
+               str(i.invoice_number, 100), num(i.credited_amount), toMysqlDate(i.date)]
+            );
+          } catch (e) {
+            console.warn('[ZB credit_note_invoices]', c.creditnote_id, i.invoice_id, e.message);
+          }
         }
       }
       await upsertCreditNoteLineItems(userId, orgId, c);

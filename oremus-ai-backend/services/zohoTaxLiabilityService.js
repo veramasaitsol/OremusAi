@@ -140,6 +140,10 @@ function renderLevies(levies, { currency, from, to, source, statuses, othersAmou
   let total = 0;
   for (const lv of ordered) {
     total = round2(total + lv.tax);
+    // Newest first — matches Zoho's own "<Tax> - Transactions" drill-down order.
+    const breakdown = lv.breakdown && lv.breakdown.length
+      ? [...lv.breakdown].sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+      : undefined;
     rows.push({
       label: lv.taxId || '',
       cells: {
@@ -153,9 +157,11 @@ function renderLevies(levies, { currency, from, to, source, statuses, othersAmou
         taxable: lv.taxable,
         taxAmount: lv.tax,
       },
+      breakdown,
+      breakdownCount: breakdown ? breakdown.length : undefined,
     });
   }
-
+  rows.sort((a, b) => (b.cells.taxName || '').localeCompare(a.cells.taxName || ''));
   // Add "Others" row if non-zero (manual transactions in Tax Payable account)
   if (Math.abs(othersAmount) > 0.005) {
     rows.push({
@@ -222,7 +228,8 @@ const BILL_TXN_TYPES = "('Bill','ACCPAY','bill','ACCPAYCREDIT','Vendor Credit','
  */
 async function buildQuickbooksTaxLiability(userId, orgId, from, to) {
   const [lines] = await pool.execute(
-    `SELECT li.zoho_invoice_id AS doc_id, li.item_name, li.item_total
+    `SELECT li.zoho_invoice_id AS doc_id, li.item_name, li.item_total,
+            i.invoice_number AS doc_number, i.date AS doc_date
        FROM zb_invoice_line_items li
        JOIN invoices i
          ON i.zoho_id = li.zoho_invoice_id AND i.org_id = li.org_id AND i.user_id = li.user_id
@@ -236,24 +243,31 @@ async function buildQuickbooksTaxLiability(userId, orgId, from, to) {
   const byDoc = new Map();
   for (const l of lines) {
     let d = byDoc.get(l.doc_id);
-    if (!d) { d = { base: 0, gst: [] }; byDoc.set(l.doc_id, d); }
+    if (!d) { d = { base: 0, gst: [], docNumber: l.doc_number, docDate: l.doc_date }; byDoc.set(l.doc_id, d); }
     const levyName = gstLevyName(l.item_name);
     if (levyName) d.gst.push({ levyName, amount: num(l.item_total) });
     else d.base = round2(d.base + num(l.item_total));
   }
 
   const levies = new Map();
-  for (const d of byDoc.values()) {
+  for (const [docId, d] of byDoc) {
     for (const g of d.gst) {
       const pct = d.base > 0 ? round2((g.amount / d.base) * 100) : null;
       const key = `${g.levyName}|${pct ?? 'na'}`;
       let levy = levies.get(key);
       if (!levy) {
-        levy = { taxId: '', name: pct != null ? `${g.levyName}${rateSuffix(pct)}` : g.levyName, pct, taxable: pct != null ? 0 : null, tax: 0 };
+        levy = { taxId: '', name: pct != null ? `${g.levyName}${rateSuffix(pct)}` : g.levyName, pct, taxable: pct != null ? 0 : null, tax: 0, breakdown: [] };
         levies.set(key, levy);
       }
       if (pct != null) levy.taxable = round2(levy.taxable + d.base);
       levy.tax = round2(levy.tax + g.amount);
+      levy.breakdown.push({
+        date: d.docDate ? String(d.docDate).slice(0, 10) : null,
+        ref: d.docNumber || docId,
+        type: 'Invoice',
+        txnAmount: pct != null ? round2(d.base) : null,
+        amount: round2(g.amount),
+      });
     }
   }
 
@@ -261,39 +275,61 @@ async function buildQuickbooksTaxLiability(userId, orgId, from, to) {
   // Purchase-origin movement (debit − credit) on the Input GST control
   // accounts. GST payments to the government and ITC set-off journals also
   // touch these accounts, so they are excluded by the transaction-type filter.
+  // Fetched per-row (not pre-aggregated) so each contributing bill can be
+  // listed in the row's drill-down, the same as the output side above.
   const [itcRows] = await pool.execute(
     `SELECT CASE WHEN LOWER(account_name) LIKE 'input cgst%' THEN 'CGST'
                  WHEN LOWER(account_name) LIKE 'input sgst%' THEN 'SGST'
                  WHEN LOWER(account_name) LIKE 'input igst%' THEN 'IGST' END AS levy,
-            ROUND(SUM(CASE WHEN transaction_type IN ${BILL_TXN_TYPES}
-                           THEN debit - credit ELSE 0 END), 2) AS itc
+            transaction_date, reference_number, transaction_number, transaction_type, source_id,
+            debit, credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND (LOWER(account_name) LIKE 'input cgst%'
           OR LOWER(account_name) LIKE 'input sgst%'
           OR LOWER(account_name) LIKE 'input igst%')
+        AND transaction_type IN ${BILL_TXN_TYPES}
         AND transaction_date BETWEEN ? AND ?
-        AND transaction_id NOT LIKE 'xero-recon:%'
-      GROUP BY levy`,
+        AND transaction_id NOT LIKE 'xero-recon:%'`,
     [userId, orgId, from, to]
   );
+  const itcByLevy = new Map();
   for (const r of itcRows) {
     if (!r.levy) continue;
-    const itc = round2(num(r.itc));
+    let e = itcByLevy.get(r.levy);
+    if (!e) { e = { itc: 0, rows: [] }; itcByLevy.set(r.levy, e); }
+    const rowNet = num(r.debit) - num(r.credit);
+    e.itc = round2(e.itc + rowNet);
+    e.rows.push({
+      date: r.transaction_date ? String(r.transaction_date).slice(0, 10) : null,
+      ref: r.reference_number || r.transaction_number || r.source_id,
+      type: r.transaction_type || 'Bill',
+      tax: round2(-rowNet),
+    });
+  }
+  let anyItc = false;
+  for (const [levyName, e] of itcByLevy) {
+    const itc = round2(e.itc);
     if (itc === 0) continue;
-    const pct = GST_SLAB_RATE[r.levy];
-    levies.set(`input|${r.levy}`, {
+    anyItc = true;
+    const pct = GST_SLAB_RATE[levyName];
+    levies.set(`input|${levyName}`, {
       taxId: '',
-      name: `${r.levy}${rateSuffix(pct)} (Input)`,
+      name: `${levyName}${rateSuffix(pct)} (Input)`,
       pct,
       taxable: round2(-itc / (pct / 100)),
       tax: -itc,
+      breakdown: e.rows.map((r) => ({
+        date: r.date, ref: r.ref, type: r.type,
+        txnAmount: round2(r.tax / (pct / 100)),
+        amount: r.tax,
+      })),
     });
   }
 
   const currency = await getBaseCurrency(orgId);
   const out = renderLevies(levies, { currency, from, to, source: 'ledger' });
-  if (itcRows.some((r) => num(r.itc) !== 0)) {
+  if (anyItc) {
     out.meta.taxRateAssumed = 'ITC rows on 18% slab (CGST/SGST 9%, IGST 18%)';
   }
   return out;
@@ -314,6 +350,36 @@ const XERO_GST_RATE = { CGST: 9, SGST: 9, IGST: 18 };
  * ManualJournals. Tax collected per account is exact off the ledger; rate and
  * Transaction Amount are derived on the 18% GST slab (see XERO_GST_RATE).
  */
+// Xero has no sibling sales/purchase document to trace per GST credit (see the
+// module doc comment), so a "drill-down" here can only list the raw GL
+// postings that make up the account's total — not the underlying invoices —
+// scoped to whichever source the header figure above was actually built from
+// (`onlyManualJournal`), so the breakdown always sums to the row it expands.
+// `side` picks the same field the header total uses: 'credit' for the Output
+// accounts (credit − debit), 'debit' for the Input accounts (−debit only,
+// credits on an Input account are ignored the same way the header is).
+async function xeroAccountBreakdown(userId, orgId, from, to, accountPrefix, side, onlyManualJournal) {
+  const [rows] = await pool.execute(
+    `SELECT transaction_date, reference_number, transaction_number, source_type, debit, credit
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ?
+        AND account_name LIKE ?
+        AND transaction_date BETWEEN ? AND ?
+        AND source_type != 'xero-recon'
+        ${onlyManualJournal ? "AND source_type = 'ManualJournal'" : ''}`,
+    [userId, orgId, `${accountPrefix}%`, from, to]
+  );
+  return rows
+    .map((r) => ({
+      date: r.transaction_date ? String(r.transaction_date).slice(0, 10) : null,
+      ref: r.reference_number || r.transaction_number || null,
+      type: r.source_type || 'GL Posting',
+      txnAmount: null,
+      amount: side === 'debit' ? round2(-num(r.debit)) : round2(num(r.credit) - num(r.debit)),
+    }))
+    .filter((r) => r.amount !== 0);
+}
+
 async function buildXeroTaxLiability(userId, orgId, from, to) {
   // Xero books its periodic GST as rollup ManualJournals crediting the three
   // Output accounts. The posting engine ALSO synthesises a per-invoice ACCREC
@@ -351,15 +417,19 @@ async function buildXeroTaxLiability(userId, orgId, from, to) {
     if (!levyName) continue;
     // Rollup ManualJournal credit is the authoritative period liability;
     // fall back to the raw credit total, then to setoff-journal debits.
+    const usedMj = round2(r.mj_credit || 0) !== 0;
     const tax = round2(r.mj_credit || 0) || round2(r.credit_total || 0) || round2(r.mj_debit || 0);
     if (tax === 0) continue;
     const pct = XERO_GST_RATE[levyName] || null;
+    // eslint-disable-next-line no-await-in-loop
+    const breakdown = await xeroAccountBreakdown(userId, orgId, from, to, `Output ${levyName}`, 'credit', usedMj);
     levies.set(levyName, {
       taxId: '',
       name: pct != null ? `${levyName}${rateSuffix(pct)}` : levyName,
       pct,
       taxable: pct != null ? round2(tax / (pct / 100)) : null,
       tax,
+      breakdown,
     });
   }
 
@@ -383,12 +453,15 @@ async function buildXeroTaxLiability(userId, orgId, from, to) {
     const key = `input|${levyName}`;
     const pct = XERO_GST_RATE[levyName] || null;
     const tax = -round2(r.debit_total);
+    // eslint-disable-next-line no-await-in-loop
+    const breakdown = await xeroAccountBreakdown(userId, orgId, from, to, `Input ${levyName}`, 'debit', false);
     levies.set(key, {
       taxId: '',
       name: pct != null ? `${levyName}${rateSuffix(pct)} (Input)` : `${levyName} (Input)`,
       pct,
       taxable: pct != null ? round2(tax / (pct / 100)) : null,
       tax,
+      breakdown,
     });
   }
 
@@ -411,11 +484,14 @@ async function buildTaxLiability(userId, params = {}) {
   if (params.platform === 'xero') return buildXeroTaxLiability(userId, orgId, from, to);
 
   // Taxable amount per document per tax, off the posted invoices in the period.
-  // Lines with no tax on them are not part of a tax summary.
+  // Lines with no tax on them are not part of a tax summary. doc_number/doc_date
+  // (functionally dependent on doc_id, so MAX() is safe — same convention as
+  // tax_percentage above) feed the drill-down breakdown below, not the totals.
   const [docs] = await pool.execute(
     `SELECT li.zoho_invoice_id AS doc_id, li.tax_id, li.tax_name, li.tax_type,
             MAX(li.tax_percentage) AS tax_percentage,
-            SUM(li.item_total) AS taxable
+            SUM(li.item_total) AS taxable,
+            MAX(i.invoice_number) AS doc_number, MAX(i.date) AS doc_date
        FROM zb_invoice_line_items li
        JOIN invoices i
          ON i.zoho_id = li.zoho_invoice_id AND i.org_id = li.org_id AND i.user_id = li.user_id
@@ -433,7 +509,8 @@ async function buildTaxLiability(userId, params = {}) {
   const [creditDocs] = await pool.execute(
     `SELECT li.zoho_creditnote_id AS doc_id, li.tax_id, li.tax_name, li.tax_type,
             MAX(li.tax_percentage) AS tax_percentage,
-            -SUM(li.item_total) AS taxable
+            -SUM(li.item_total) AS taxable,
+            MAX(c.creditnote_number) AS doc_number, MAX(c.date) AS doc_date
        FROM zb_credit_note_line_items li
        JOIN zb_credit_notes c
          ON c.zoho_creditnote_id = li.zoho_creditnote_id
@@ -453,7 +530,8 @@ async function buildTaxLiability(userId, params = {}) {
   const [billDocs] = await pool.execute(
     `SELECT li.zoho_bill_id AS doc_id, li.tax_id, li.tax_name, li.tax_type,
             MAX(li.tax_percentage) AS tax_percentage,
-            -SUM(li.item_total) AS taxable
+            -SUM(li.item_total) AS taxable,
+            MAX(b.bill_number) AS doc_number, MAX(b.date) AS doc_date
        FROM zb_bill_line_items li
        JOIN bills b
          ON b.zoho_id = li.zoho_bill_id AND b.org_id = li.org_id AND b.user_id = li.user_id
@@ -469,9 +547,16 @@ async function buildTaxLiability(userId, params = {}) {
   const currency = await getBaseCurrency(orgId);
 
   // Split each charged tax into the levies it is reported under, then pool them:
-  // two different groups can both contribute to, say, CGST9.
+  // two different groups can both contribute to, say, CGST9. Each document also
+  // pushes one drill-down row per levy it contributes to — this is what backs
+  // the "<Tax> - Transactions" breakdown a Tax Liability row expands into.
+  const taggedDocs = [
+    ...docs.map((d) => ({ ...d, docType: 'Invoice' })),
+    ...creditDocs.map((d) => ({ ...d, docType: 'Credit Note' })),
+    ...billDocs.map((d) => ({ ...d, docType: 'Bill' })),
+  ];
   const levies = new Map();
-  for (const d of [...docs, ...creditDocs, ...billDocs]) {
+  for (const d of taggedDocs) {
     const pct = num(d.tax_percentage);
     const taxable = num(d.taxable);
     const isGroup = String(d.tax_type) === 'tax_group' && !/^IGST/i.test(d.tax_name || '');
@@ -485,11 +570,19 @@ async function buildTaxLiability(userId, params = {}) {
       if (!levy) {
         // A group's components are not taxes in their own right in Zoho's tax
         // list, so they are identified by the group that levied them.
-        levy = { taxId: d.tax_id || '', name: p.name, pct: p.pct, taxable: 0, tax: 0 };
+        levy = { taxId: d.tax_id || '', name: p.name, pct: p.pct, taxable: 0, tax: 0, breakdown: [] };
         levies.set(key, levy);
       }
+      const partTax = round2(taxable * p.pct / 100);
       levy.taxable = round2(levy.taxable + taxable);
-      levy.tax = round2(levy.tax + round2(taxable * p.pct / 100));
+      levy.tax = round2(levy.tax + partTax);
+      levy.breakdown.push({
+        date: d.doc_date ? String(d.doc_date).slice(0, 10) : null,
+        ref: d.doc_number || d.doc_id,
+        type: d.docType,
+        txnAmount: round2(taxable),
+        amount: partTax,
+      });
     }
   }
 
