@@ -1293,6 +1293,43 @@ CREATE TABLE IF NOT EXISTS zb_vendor_credits (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Vendor credit line items — and the per-rate tax breakdown the Tax Liability /
+-- Tax Summary report needs — live ONLY on the /vendorcredits/{id} DETAIL
+-- payload, exactly like invoices/bills/credit notes. Mirrors
+-- zb_credit_note_line_items.
+CREATE TABLE IF NOT EXISTS zb_vendor_credit_line_items (
+  id                                  INT AUTO_INCREMENT PRIMARY KEY,
+  user_id                             INT          NOT NULL,
+  org_id                              VARCHAR(100) NOT NULL,
+  zoho_line_item_id                   VARCHAR(100) NOT NULL,
+  zoho_vendor_credit_id               VARCHAR(100) NOT NULL,
+  line_position                       INT          DEFAULT 0,
+  zoho_item_id                        VARCHAR(100) NULL,
+  item_name                           VARCHAR(255) NULL,
+  description                         TEXT         NULL,
+  unit                                VARCHAR(50)  NULL,
+  hsn_or_sac                          VARCHAR(50)  NULL,
+  account_id                          VARCHAR(100) NULL,
+  account_name                        VARCHAR(255) NULL,
+  quantity                            DECIMAL(18,4) DEFAULT 0,
+  rate                                DECIMAL(18,4) DEFAULT 0,
+  discount                            DECIMAL(18,4) DEFAULT 0,
+  discount_amount                     DECIMAL(18,4) DEFAULT 0,
+  item_total                          DECIMAL(18,4) DEFAULT 0,
+  item_total_inclusive_of_tax         DECIMAL(18,4) DEFAULT 0,
+  tax_id                              VARCHAR(100) NULL,
+  tax_name                            VARCHAR(255) NULL,
+  tax_type                            VARCHAR(64)  NULL,
+  tax_percentage                      DECIMAL(7,4) NULL,
+  tax_amount                          DECIMAL(18,4) DEFAULT 0,
+  project_id                          VARCHAR(100) NULL,
+  custom_fields_json                  JSON         NULL,
+  UNIQUE KEY uq_zbvcli (user_id, org_id, zoho_line_item_id),
+  INDEX idx_zbvcli_vc   (zoho_vendor_credit_id),
+  INDEX idx_zbvcli_item (zoho_item_id),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ════════════════════════════════════════════════════════════════════════════
 --  SILVER — expenses, journals, bank, documents
 -- ════════════════════════════════════════════════════════════════════════════
