@@ -25,6 +25,18 @@
 
 const pool = require('../config/db');
 
+// Sales-document source_type codes, by platform. Each connected org belongs to
+// exactly one platform, so one combined IN-list works everywhere with no
+// per-platform branching: Zoho stores its own lowercase type ('invoice' /
+// 'creditnote'), QuickBooks stores its own display label ('Invoice' /
+// 'Credit Memo' — see glTypeLabel's note that QuickBooks already stores its
+// printed labels), Xero its document type ('ACCREC' / 'ACCRECCREDIT').
+const SALES_INVOICE_TYPES = ['invoice', 'Invoice', 'ACCREC'];
+const SALES_CREDITNOTE_TYPES = ['creditnote', 'Credit Memo', 'ACCRECCREDIT'];
+const SALES_DOC_TYPES = [...SALES_INVOICE_TYPES, ...SALES_CREDITNOTE_TYPES];
+const inList = (arr) => arr.map(() => '?').join(',');
+const isCreditNoteType = (sourceType) => SALES_CREDITNOTE_TYPES.includes(sourceType);
+
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -206,11 +218,11 @@ async function buildSalesByCustomer(userId, params = {}) {
               MAX(at.currency_code) AS currency
          FROM account_transactions at
         WHERE at.user_id = ? AND at.org_id = ?
-          AND at.source_type IN ('ACCREC', 'ACCRECCREDIT')
+          AND at.source_type IN (${inList(SALES_DOC_TYPES)})
           AND at.transaction_date BETWEEN ? AND ?
         GROUP BY customer
         ORDER BY total DESC`,
-      [userId, orgId, from, to]
+      [userId, orgId, ...SALES_DOC_TYPES, from, to]
     );
     txnGrouped = rows;
   } else {
@@ -226,11 +238,11 @@ async function buildSalesByCustomer(userId, params = {}) {
               MAX(at.currency_code) AS currency
          FROM account_transactions at
         WHERE at.user_id = ? AND at.org_id = ?
-          AND at.source_type IN ('ACCREC', 'ACCRECCREDIT')
+          AND at.source_type IN (${inList(SALES_DOC_TYPES)})
           AND at.transaction_date BETWEEN ? AND ?
         GROUP BY customer
         ORDER BY total DESC`,
-      [userId, orgId, from, to]
+      [userId, orgId, ...SALES_DOC_TYPES, from, to]
     );
     txnGrouped = rows;
   }
@@ -307,7 +319,8 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
 
   const { from, to } = resolveRange(params);
 
-  // Primary: account_transactions (ACCREC / ACCRECCREDIT income lines).
+  // Primary: account_transactions (invoice / credit-note income lines — see
+  // SALES_DOC_TYPES for each platform's own source_type spelling).
   // Each invoice has one income-account line per entry; group by source_id to
   // get per-invoice totals, then nest under customer.
   const [txnRows] = await pool.execute(
@@ -322,11 +335,11 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
             at.source_type
        FROM account_transactions at
       WHERE at.user_id = ? AND at.org_id = ?
-        AND at.source_type IN ('ACCREC', 'ACCRECCREDIT')
+        AND at.source_type IN (${inList(SALES_DOC_TYPES)})
         AND at.account_group = 'income'
         AND at.transaction_date BETWEEN ? AND ?
       ORDER BY at.transaction_details, at.transaction_date, at.reference_number`,
-    [userId, orgId, from, to]
+    [userId, orgId, ...SALES_DOC_TYPES, from, to]
   );
 
   // Fallback: invoices table (pre-sync connections).
@@ -400,7 +413,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
       const absSum = lines.reduce((s, ln) => s + Math.abs(num(ln.item_total)), 0);
       let taxLeft = spread ? invTax : 0;
       lines.forEach((ln, idx) => {
-        const sign = row.source_type === 'ACCRECCREDIT' ? -1 : 1;
+        const sign = isCreditNoteType(row.source_type) ? -1 : 1;
         const base = num(ln.item_total);
         let taxPart = 0;
         if (spread) {
@@ -410,7 +423,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
         }
         entries.push({
           date:    row.d,
-          type:    row.source_type === 'ACCRECCREDIT' ? 'Credit Note' : 'Invoice',
+          type:    isCreditNoteType(row.source_type) ? 'Credit Note' : 'Invoice',
           num:     row.invoice_number || '',
           product: ln.product || '',
           desc:    ln.description || '',
@@ -422,7 +435,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
     } else {
       entries.push({
         date:    row.d,
-        type:    row.source_type === 'ACCRECCREDIT' ? 'Credit Note' : 'Invoice',
+        type:    isCreditNoteType(row.source_type) ? 'Credit Note' : 'Invoice',
         num:     row.invoice_number || '',
         product: row.product || '',
         desc:    row.description || '',

@@ -38,6 +38,22 @@ function r2(n) {
   return Math.round(num(n) * 100) / 100;
 }
 
+// Cross-platform Retained-Earnings-family label matcher — common synonyms
+// covered explicitly (Zoho/QuickBooks/Xero all differ here), matched as a
+// PREFIX (not anchored at the end) so a synced account with a dedup suffix
+// ("Retained Earnings9", from a platform renaming a clashing account name)
+// still matches. account_type_code carries no finer subtype than a flat
+// 'equity' in any connected platform's synced chart today, so the label is
+// the only reliable signal available — `entry.isRetainedEarnings` is checked
+// first so a future platform adapter can supply a real metadata flag (an
+// account-level tag, a parent/child hierarchy walk, …) without this matcher
+// changing shape.
+const RETAINED_EARNINGS_RE = /^(retained\s+earnings?|accumulated\s+(earnings?|profits?|surplus)|retained\s+(profits?|surplus))/i;
+function isRetainedEarningsAccount(entry) {
+  if (entry && entry.isRetainedEarnings) return true;
+  return RETAINED_EARNINGS_RE.test(String((entry && entry.name) || '').trim());
+}
+
 // Resolve the org to report on: an explicit org (X-Org-Id switcher) wins,
 // otherwise fall back to the connection's primary org.
 async function resolveOrgId(userId, params) {
@@ -567,41 +583,41 @@ async function aggregateBS(userId, orgId, platform, asOf, earningsFrom = null, f
     for (const [id, v] of map) if (v.amount === 0) map.delete(id);
   }
 
-  // Roll prior-year accumulated earnings into the equity section so the
-  // Balance Sheet balances (Assets = Liabilities + Equity).
-  //
-  // When the ledger already carries a Retained Earnings account with its own
-  // journal balance (as Xero does — its opening balance IS the pre-FY
-  // earnings), adding priorEarnings on top double-counts.  So:
-  //   • If a RE account exists → emit priorEarnings as a separate
-  //     "Prior Year Earnings" line (keeps RE  accurate, BS still balances).
-  //   • If no RE account exists → create a synthetic Retained Earnings line.
+  // Retained Earnings — accumulated, not-yet-distributed prior-year P&L — is
+  // derived the SAME way for every platform; nothing here branches on which
+  // one this org is connected to:
+  //   1. Find every equity account that IS a Retained-Earnings-family account
+  //      (see isRetainedEarningsAccount — label match today, extensible to a
+  //      platform-supplied metadata flag). A chart of accounts can carry more
+  //      than one (a renamed/duplicated account, e.g. Xero's "Retained
+  //      Earnings" + "Retained Earnings9") — merge them into ONE combined
+  //      balance instead of printing each as its own row.
+  //   2. Add `priorEarnings` (the ORGANIC pre-FY P&L not yet booked to any
+  //      equity account — true-up/reconciliation plugs excluded, see the query
+  //      above) on top. This never double-counts against step 1: a genuine
+  //      prior-years closing/opening-balance entry and the organic P&L for
+  //      LATER, still-unclosed years are non-overlapping periods by
+  //      construction — the platform simply hasn't posted a closing entry for
+  //      the later years yet.
+  //   3. Exactly one real match → fold the combined total into IT, keeping its
+  //      real account id (so Trial Balance / General Ledger keep showing that
+  //      same ledger account, unaffected by this merge). Multiple matches
+  //      collapse into the first (alphabetically, since accounts are queried
+  //      ordered by name) and the rest are dropped from the map. No match at
+  //      all → a synthetic "Retained Earnings" line, as before.
   priorEarnings = r2(priorEarnings);
-  if (priorEarnings !== 0) {
-    let reEntry = null;
-    for (const v of equity.values()) {
-      if (/retained\s+earnings/i.test(v.name || '')) { reEntry = v; break; }
-    }
-    if (reEntry) {
-      // QuickBooks and Zoho don't auto-close the P&L into Retained Earnings, so
-      // the RE account's own journal balance is only the part booked to it
-      // directly — fold the pre-FY accumulated earnings into it to show ONE
-      // "Retained Earnings" line (RE + prior-year earnings), matching how those
-      // platforms present it.
-      // Xero DOES roll the P&L into RE at year end, so its RE balance already
-      // includes prior years — adding priorEarnings there would double-count, so
-      // it stays on a separate "Prior Year Earnings" line.
-      const plat = String(platform || '').toLowerCase();
-      if (plat === 'quickbooks' || plat === 'zoho') {
-        reEntry.amount = r2(reEntry.amount + priorEarnings);
-      } else {
-        equity.set('__prior_earnings__', {
-          accountId: null, name: 'Prior Year Earnings', amount: priorEarnings, typeCode: 'equity',
-        });
-      }
-    } else {
-      equity.set('__retained_earnings__', {
-        accountId: null, name: 'Retained Earnings', amount: priorEarnings, typeCode: 'equity',
+  const reMatches = [...equity.entries()].filter(([, v]) => isRetainedEarningsAccount(v));
+  const reOwnBalance = r2(reMatches.reduce((s, [, v]) => s + v.amount, 0));
+  const retainedEarnings = r2(reOwnBalance + priorEarnings);
+  if (reMatches.length > 0 || priorEarnings !== 0) {
+    for (const [id] of reMatches) equity.delete(id);
+    if (retainedEarnings !== 0) {
+      const [firstId, firstEntry] = reMatches[0] || [];
+      equity.set(firstEntry ? firstId : '__retained_earnings__', {
+        accountId: firstEntry ? firstEntry.accountId : null,
+        name: 'Retained Earnings',
+        amount: retainedEarnings,
+        typeCode: 'equity',
       });
     }
   }
