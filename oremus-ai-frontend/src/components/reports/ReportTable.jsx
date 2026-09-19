@@ -1,12 +1,13 @@
 import { Fragment, useState } from 'react';
 import { useSelector } from 'react-redux';
-import { ChevronRight, ChevronDown, ChevronsUpDown } from 'lucide-react';
+import { ChevronRight, ChevronDown, ChevronsUpDown, Download } from 'lucide-react';
 import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { selectFilters } from '../../features/reports/reportsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { cn } from '../../utils/classNames.js';
 import AccountLedgerModal from './AccountLedgerModal.jsx';
 import SourceDocumentModal from './SourceDocumentModal.jsx';
+import { exportRowsCSV } from '../../utils/exportReport.js';
 
 // `numberFormat` maps the "Number format" filter (indian/international) to
 // the locale `fmt` should group digits with, overriding the currency default
@@ -15,6 +16,20 @@ function localeFor(numberFormat) {
   if (numberFormat === 'indian') return 'en-IN';
   if (numberFormat === 'international') return 'en-US';
   return undefined;
+}
+
+// Small "Export" affordance shown in a drill-down/breakdown panel's header —
+// exports just that panel's rows (not the whole report) to CSV.
+function ExportBtn({ onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-1 text-[11px] font-semibold text-navy-600 dark:text-navy-300 hover:text-brand-600"
+    >
+      <Download size={12} /> Export
+    </button>
+  );
 }
 
 function formatCell(value, decimals, currency, locale, parens = false) {
