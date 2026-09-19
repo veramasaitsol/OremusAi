@@ -1211,16 +1211,28 @@ async function syncCreditNotes(userId, accessToken, orgId, runId) {
           toMysqlDt(c.created_time), toMysqlDt(c.last_modified_time),
         ]
       );
+      // Isolated from the line-items write below: a failure here (e.g. the
+      // zb_credit_note_invoices table missing on a DB that hasn't picked up
+      // the latest migration) must never skip the line items, which is what
+      // the Tax Liability report's creditDocs join actually depends on.
       if (Array.isArray(c.invoices_credited)) {
         for (const i of c.invoices_credited) {
-          await pool.execute(
-            `INSERT INTO zb_credit_note_invoices
-               (user_id, org_id, zoho_creditnote_id, zoho_invoice_id, invoice_number, amount_applied, apply_date)
-             VALUES (?,?,?,?,?,?,?)
-             ON DUPLICATE KEY UPDATE amount_applied=VALUES(amount_applied)`,
-            [userId, orgId, str(c.creditnote_id, 100), str(i.invoice_id, 100),
-             str(i.invoice_number, 100), num(i.amount_applied), toMysqlDate(i.apply_date)]
-          );
+          try {
+            // Zoho's creditnote.invoices_credited entries use `credited_amount`
+            // and `date` — not `amount_applied`/`apply_date` (those don't exist
+            // on this payload; the old field names always resolved to
+            // undefined, silently writing 0 / NULL).
+            await pool.execute(
+              `INSERT INTO zb_credit_note_invoices
+                 (user_id, org_id, zoho_creditnote_id, zoho_invoice_id, invoice_number, amount_applied, apply_date)
+               VALUES (?,?,?,?,?,?,?)
+               ON DUPLICATE KEY UPDATE amount_applied=VALUES(amount_applied)`,
+              [userId, orgId, str(c.creditnote_id, 100), str(i.invoice_id, 100),
+               str(i.invoice_number, 100), num(i.credited_amount), toMysqlDate(i.date)]
+            );
+          } catch (e) {
+            console.warn('[ZB credit_note_invoices]', c.creditnote_id, i.invoice_id, e.message);
+          }
         }
       }
       await upsertCreditNoteLineItems(userId, orgId, c);
@@ -1232,13 +1244,62 @@ async function syncCreditNotes(userId, accessToken, orgId, runId) {
   return { calls: calls + detailCalls, fetched: items.length, inserted: n, updated: 0, failed: items.length - n };
 }
 
+// Vendor credit line items — and the per-rate tax breakdown the Tax Liability
+// report needs — live ONLY on the /vendorcredits/{id} DETAIL payload, exactly
+// like invoices/bills/credit notes. Mirrors upsertCreditNoteLineItems.
+async function upsertVendorCreditLineItems(userId, orgId, vc) {
+  if (!Array.isArray(vc.line_items)) return;
+  for (let i = 0; i < vc.line_items.length; i++) {
+    const li = vc.line_items[i];
+    await pool.execute(
+      `INSERT INTO zb_vendor_credit_line_items
+         (user_id, org_id, zoho_line_item_id, zoho_vendor_credit_id, line_position,
+          zoho_item_id, item_name, description, unit, hsn_or_sac, account_id, account_name,
+          quantity, rate, discount, discount_amount, item_total, item_total_inclusive_of_tax,
+          tax_id, tax_name, tax_type, tax_percentage, tax_amount,
+          project_id, custom_fields_json)
+       VALUES (?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?, ?,?)
+       ON DUPLICATE KEY UPDATE
+         item_name = VALUES(item_name), quantity = VALUES(quantity),
+         rate = VALUES(rate), item_total = VALUES(item_total),
+         tax_id = VALUES(tax_id), tax_name = VALUES(tax_name),
+         tax_type = VALUES(tax_type), tax_percentage = VALUES(tax_percentage),
+         tax_amount = VALUES(tax_amount)`,
+      [
+        userId, orgId, str(li.line_item_id, 100), str(vc.vendor_credit_id, 100), i,
+        str(li.item_id, 100), str(li.name || li.item_name, 255), str(li.description, 2000),
+        str(li.unit, 50), str(li.hsn_or_sac, 50),
+        str(li.account_id, 100), str(li.account_name, 255),
+        num(li.quantity), num(li.rate), num(li.discount), num(li.discount_amount),
+        num(li.item_total), num(li.item_total_inclusive_of_tax),
+        str(li.tax_id, 100), str(li.tax_name, 255), str(li.tax_type, 64),
+        num(li.tax_percentage), num(li.tax_amount),
+        str(li.project_id, 100), safeJson(li.custom_fields),
+      ]
+    );
+  }
+}
+
 async function syncVendorCredits(userId, accessToken, orgId, runId) {
   const { items, calls } = await fetchAllPages({
     accessToken, orgId, endpoint: '/vendorcredits', listKey: 'vendor_credits',
     userId, syncRunId: runId,
   });
-  let n = 0;
-  for (const v of items) {
+  let n = 0, detailCalls = 0;
+  for (const listRow of items) {
+    // The LIST payload carries neither sub_total/tax_total nor the line items,
+    // so merge the detail over it and fall back to the list row if it fails.
+    let v = listRow;
+    try {
+      const detail = await fetchOne({
+        accessToken, orgId, endpoint: `/vendorcredits/${listRow.vendor_credit_id}`,
+        dataKey: 'vendorcredit', userId, syncRunId: runId,
+      });
+      detailCalls += 1;
+      if (detail) v = { ...listRow, ...detail };
+    } catch (e) {
+      console.warn('[ZB vendor_credit detail]', listRow.vendor_credit_id, e.message);
+    }
     try {
       await pool.execute(
         `INSERT INTO zb_vendor_credits
@@ -1249,7 +1310,9 @@ async function syncVendorCredits(userId, accessToken, orgId, runId) {
             currency_id, currency_code, exchange_rate,
             zoho_created_time, zoho_last_modified_time)
          VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?, ?,?,?, ?,?)
-         ON DUPLICATE KEY UPDATE status=VALUES(status), balance=VALUES(balance), synced_at=NOW()`,
+         ON DUPLICATE KEY UPDATE status=VALUES(status), balance=VALUES(balance),
+           sub_total=VALUES(sub_total), tax_total=VALUES(tax_total),
+           total=VALUES(total), total_bcy=VALUES(total_bcy), synced_at=NOW()`,
         [
           userId, orgId, str(v.vendor_credit_id, 100), str(v.vendor_credit_number, 100),
           str(v.reference_number, 100), str(v.status, 50),
@@ -1260,12 +1323,13 @@ async function syncVendorCredits(userId, accessToken, orgId, runId) {
           toMysqlDt(v.created_time), toMysqlDt(v.last_modified_time),
         ]
       );
+      await upsertVendorCreditLineItems(userId, orgId, v);
       n += 1;
     } catch (e) {
       console.warn('[ZB vendor_credit]', v.vendor_credit_id, e.message);
     }
   }
-  return { calls, fetched: items.length, inserted: n, updated: 0, failed: items.length - n };
+  return { calls: calls + detailCalls, fetched: items.length, inserted: n, updated: 0, failed: items.length - n };
 }
 
 async function syncExpenses(userId, accessToken, orgId, runId) {

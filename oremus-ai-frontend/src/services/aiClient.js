@@ -127,17 +127,11 @@ export async function askAI({ platform, question }) {
   );
   const normalized = normalizeAIResponse(data);
   if (!normalized.success) {
-    // Failed response → surface the service's own STATUS value first (e.g.
-    // "FAILED", "NO_SQL"), followed by its reason text when one is provided.
-    const status = String(data?.status ?? normalized.status ?? 'FAILED');
-    const detail = [normalized.answer, data?.error, data?.message]
-      .find((s) => typeof s === 'string' && s.trim());
-    const detailText = detail
-      ? (detail.length > 300 ? `${detail.slice(0, 300)}…` : detail)
-      : '';
-    const err = new Error(detailText ? `Status: ${status} — ${detailText}` : `Status: ${status}`);
-    err.aiResponse = normalized;
-    throw err;
+    // Even on failure, render the data text as a normal answer card (not a
+    // red error bubble). Strip HTML from data to get plain text.
+    const strip = (s) => (typeof s === 'string' ? s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() : '');
+    normalized.answer = strip(data?.data) || strip(data?.summary) || normalized.answer || '';
+    normalized.success = true; // render as normal answer
   }
   return normalized;
 }

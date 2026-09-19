@@ -24,6 +24,7 @@
  */
 
 const pool = require('../config/db');
+const { getBaseCurrency } = require('./zohoChartOfAccountsService');
 
 function num(v) {
   const n = Number(v);
@@ -512,7 +513,7 @@ async function buildSalesByProductSummary(userId, params = {}) {
   const [invoices] = await pool.execute(
     `SELECT zoho_id, invoice_number, customer_name,
             DATE_FORMAT(date, '%Y-%m-%d') AS d, total, ROUND(tax_total, 2) AS tax_total,
-            currency_code
+            currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
         AND date BETWEEN ? AND ?
@@ -539,7 +540,11 @@ async function buildSalesByProductSummary(userId, params = {}) {
     }
   }
 
-  const currency = invoices.find((r) => r.currency_code)?.currency_code || 'INR';
+  // The report's own currency is always the org's base/reporting currency —
+  // never a per-invoice currency_code — because every amount below is
+  // converted to it (see `rate` in the loop) before being summed, so a report
+  // spanning invoices in several currencies still foots correctly.
+  const currency = await getBaseCurrency(orgId);
 
   // product → { qty, amount, hasQty, entries[] }. entries feed the inline
   // drill-down: each underlying invoice line (customer / invoice# / date /
@@ -555,6 +560,11 @@ async function buildSalesByProductSummary(userId, params = {}) {
   };
   for (const inv of invoices) {
     const lines = linesByInvoice.get(String(inv.zoho_id)) || [];
+    // Every amount is native to the invoice's own currency_code — converted to
+    // the org's base currency (see `currency` above) via the invoice's own
+    // exchange_rate (the rate Zoho/QuickBooks/Xero themselves booked it at),
+    // never a live/current rate, so historical reports stay stable.
+    const rate = num(inv.exchange_rate) || 1;
     const entryBase = {
       name: inv.customer_name || '—',
       ref: inv.invoice_number || null,
@@ -581,6 +591,7 @@ async function buildSalesByProductSummary(userId, params = {}) {
         taxLeft = round2(taxLeft - taxPart);
         amount = round2(amount + taxPart);
       }
+      amount = round2(amount * rate);
       add(ln.product, ln.quantity, amount, { ...entryBase, amount });
     });
   }
@@ -710,7 +721,7 @@ async function buildArAgingSummary(userId, params = {}) {
   // Statuses excluded are the non-receivable ones across all three providers:
   // Zoho draft/void, Xero DRAFT/SUBMITTED/VOIDED/DELETED, QuickBooks drafts.
   const [invoices] = await pool.execute(
-    `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code
+    `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'approved', 'submitted', 'void', 'voided', 'deleted')`,
@@ -718,8 +729,18 @@ async function buildArAgingSummary(userId, params = {}) {
   );
 
   await attachAsOfBalances(invoices, userId, orgId, asOf);
+  // _balanceAsOf is reconstructed above entirely in the invoice's own native
+  // currency (payments/credit notes applied to it are booked the same way) —
+  // convert to the org's base currency only now, at the very end, so every
+  // customer/bucket total that follows sums correctly across currencies.
+  for (const inv of invoices) {
+    inv._balanceAsOf = round2(inv._balanceAsOf * (num(inv.exchange_rate) || 1));
+  }
 
-  const currency = invoices.find((r) => r.currency_code)?.currency_code || 'INR';
+  // Always the org's base/reporting currency, never a per-invoice code — every
+  // amount below is already converted to it (see the loop above and `rate`
+  // further down), so a multi-currency org's totals still foot correctly.
+  const currency = await getBaseCurrency(orgId);
 
   const columns = [
     { key: 'customer', label: 'Customer Name', align: 'left'  },
@@ -729,6 +750,16 @@ async function buildArAgingSummary(userId, params = {}) {
 
   // customer → { bucketId: amount }
   const byCustomer = new Map();
+  // customer → { bucketId: [ {name, ref, date, amount}, … ] } — the exact
+  // invoices/credits behind each cell, for the click-to-drill-down below
+  // (mirrors QuickBooks' own "click a Summary cell → see its Detail rows").
+  const byCustomerDrill = new Map();
+  const drillFor = (customer, bucketId) => {
+    if (!byCustomerDrill.has(customer)) {
+      byCustomerDrill.set(customer, Object.fromEntries(BUCKETS.map((b) => [b.id, []])));
+    }
+    return byCustomerDrill.get(customer)[bucketId];
+  };
   const totals = Object.fromEntries(BUCKETS.map((b) => [b.id, 0]));
   let grandTotal = 0;
 
@@ -753,6 +784,9 @@ async function buildArAgingSummary(userId, params = {}) {
     byCustomer.get(customer)[bucket.id] += bal;
     totals[bucket.id] += bal;
     grandTotal += bal;
+    drillFor(customer, bucket.id).push({
+      name: customer, ref: inv.invoice_number || '', date: fmtDate(new Date(agingDate)), amount: round2(bal),
+    });
   }
 
   // Standalone unapplied / overpayment customer-Payment credits still reduce a
@@ -762,7 +796,7 @@ async function buildArAgingSummary(userId, params = {}) {
   // (proven — see zohoArAgingDetailService.js), so only synthetic (non-Zoho)
   // payment rows qualify: real Zoho ids are bare numeric, ours are `qbo:`/`xero:`.
   const [creditPayments] = await pool.execute(
-    `SELECT customer_name, date, unused_amount
+    `SELECT customer_name, date, unused_amount, exchange_rate
        FROM zb_customer_payments
       WHERE user_id = ? AND org_id = ? AND date <= ? AND unused_amount <> 0
         AND zoho_payment_id LIKE '%:%'`,
@@ -771,7 +805,8 @@ async function buildArAgingSummary(userId, params = {}) {
   for (const p of creditPayments) {
     if (p.date && new Date(p.date) > asOf) continue;
     if (fromDate && p.date && new Date(p.date) < fromDate) continue;
-    const credit = -num(p.unused_amount);
+    // The payment's own rate — it isn't necessarily the same invoice as above.
+    const credit = round2(-num(p.unused_amount) * (num(p.exchange_rate) || 1));
     const age = daysBetween(asOf, new Date(p.date));
     const bucket = bucketFor(age);
     const customer = (p.customer_name || '').trim() || 'Unknown';
@@ -781,6 +816,9 @@ async function buildArAgingSummary(userId, params = {}) {
     byCustomer.get(customer)[bucket.id] += credit;
     totals[bucket.id] += credit;
     grandTotal += credit;
+    drillFor(customer, bucket.id).push({
+      name: customer, ref: 'Unapplied Credit', date: fmtDate(new Date(p.date)), amount: credit,
+    });
   }
 
   const rows = [];
@@ -788,15 +826,21 @@ async function buildArAgingSummary(userId, params = {}) {
   for (const customer of customers) {
     const b = byCustomer.get(customer);
     const cells = {};
+    const cellDrill = {};
     // Empty buckets render BLANK (not 0.00) like Xero/QuickBooks do — with nine
     // aging columns a wall of zeros hides the amounts that matter. The TOTAL row
     // below keeps real 0.00s so every column still foots.
     for (const k of BUCKETS) {
       const v = round2(b[k.id]);
       cells[k.id] = v === 0 ? '' : v;
+      const entries = byCustomerDrill.get(customer)?.[k.id];
+      if (entries && entries.length) cellDrill[k.id] = entries;
     }
     cells.total = round2(BUCKETS.reduce((s, k) => s + b[k.id], 0));
-    rows.push({ label: customer, level: 1, cells });
+    // Total column drills to every entry across all buckets for this customer.
+    const allEntries = BUCKETS.flatMap((k) => byCustomerDrill.get(customer)?.[k.id] || []);
+    if (allEntries.length) cellDrill.total = allEntries;
+    rows.push({ label: customer, level: 1, cells, cellDrill });
   }
 
   const totalCells = {};

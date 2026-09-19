@@ -144,23 +144,31 @@ async function syncInvoices(userId, accessToken, orgId) {
       await conn.execute(
         `INSERT INTO invoices
            (user_id, org_id, zoho_id, invoice_number, customer_name,
-            date, due_date, total, balance, status, synced_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,NOW())
+            date, due_date, total, balance, status,
+            currency_id, currency_code, currency_symbol, exchange_rate, synced_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
          ON DUPLICATE KEY UPDATE
-           invoice_number = VALUES(invoice_number),
-           customer_name  = VALUES(customer_name),
-           date           = VALUES(date),
-           due_date       = VALUES(due_date),
-           total          = VALUES(total),
-           balance        = VALUES(balance),
-           status         = VALUES(status),
-           synced_at      = NOW()`,
+           invoice_number  = VALUES(invoice_number),
+           customer_name   = VALUES(customer_name),
+           date            = VALUES(date),
+           due_date        = VALUES(due_date),
+           total           = VALUES(total),
+           balance         = VALUES(balance),
+           status          = VALUES(status),
+           currency_id     = VALUES(currency_id),
+           currency_code   = VALUES(currency_code),
+           currency_symbol = VALUES(currency_symbol),
+           exchange_rate   = VALUES(exchange_rate),
+           synced_at       = NOW()`,
         [
           userId, orgId, inv.invoice_id,
           inv.invoice_number || null, inv.customer_name || null,
           inv.date || null, inv.due_date || null,
           parseFloat(inv.total ?? 0), parseFloat(inv.balance ?? 0),
           inv.status || null,
+          inv.currency_id || null, inv.currency_code || null,
+          inv.currency_symbol || null,
+          inv.exchange_rate != null ? parseFloat(inv.exchange_rate) : null,
         ]
       );
     }
@@ -390,6 +398,21 @@ async function syncAccountTransactions(userId, accessToken, orgId, fromDate, toD
 
   const conn = await pool.getConnection();
   try {
+    // Begin transaction
+    await conn.beginTransaction();
+
+    // Delete existing records for the date window to remove stale rows
+    await conn.execute(
+      `DELETE FROM account_transactions
+        WHERE user_id = ? 
+          AND org_id = ? 
+          AND platform = 'zoho'
+          AND transaction_date >= ? 
+          AND transaction_date <= ?`,
+      [userId, orgId, from + ' 00:00:00', to + ' 23:59:59']
+    );
+
+    // Insert all rows for the period
     for (const t of allRows) {
       const txnId     = t.transaction_id || `${t.date ?? ''}-${t.transaction_type ?? ''}-${t.entity_number ?? ''}-${t.account_id ?? ''}`;
       const accountId = t.account_id     || (t.account_name ? t.account_name.replace(/\s+/g, '_').slice(0, 100) : 'unknown');
@@ -468,6 +491,13 @@ async function syncAccountTransactions(userId, accessToken, orgId, fromDate, toD
         );
       }
     }
+
+    // Commit the transaction
+    await conn.commit();
+  } catch (error) {
+    // Rollback on error
+    await conn.rollback();
+    throw error;
   } finally {
     conn.release();
   }

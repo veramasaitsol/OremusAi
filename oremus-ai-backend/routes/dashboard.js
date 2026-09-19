@@ -526,6 +526,7 @@ router.get('/', async (req, res) => {
         );
         if (zo?.currency) currency = zo.currency;
       } catch (_) { /* keep default INR */ }
+      var opexForBurn = 0
       try {
         // Revenue / Expenses from the local general ledger (account_transactions).
         // Use the CANONICAL P&L calculation (computePLFigures) so dashboard KPIs
@@ -542,6 +543,7 @@ router.get('/', async (req, res) => {
         if (revenue === 0 && expenses === 0) {
           throw new Error('No local ledger activity — falling back to warehouse');
         }
+        opexForBurn = plFigures.opex
         totalRevenue  = revenue;
         totalExpenses = expenses;
 
@@ -859,7 +861,7 @@ router.get('/', async (req, res) => {
     // average approach GET /kpi/burn uses), so the tile moves with the filter
     // instead of always showing a trailing-N-months-from-today figure.
     const monthCount = Math.max(1, monthKeysBetween(from, to).length);
-    const monthlyBurn = totalExpenses > 0 ? totalExpenses / monthCount : 0;
+    const monthlyBurn = opexForBurn / monthCount 
     let runwayMonths = null;
     if (monthlyBurn > 0 && cashOnHand > 0) {
       const raw = cashOnHand / monthlyBurn;

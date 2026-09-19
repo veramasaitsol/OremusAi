@@ -289,6 +289,13 @@ export default function ZohoDetailReportViewer() {
                         const bdIdx = Math.min(bdPage[i] || 0, bdPages - 1);
                         const bdStart = bdIdx * BREAKDOWN_PAGE_SIZE;
                         const bdRows = bd ? bd.slice(bdStart, bdStart + BREAKDOWN_PAGE_SIZE) : [];
+                        // Tax Liability's breakdown items carry `type` (Invoice/Bill/
+                        // Credit Note/…) instead of Cash Summary's `source` (an account
+                        // name) — swap the column set to match Zoho's own "<Tax> -
+                        // Transactions" drill (Date/Entry#/Transaction Type/Transaction
+                        // Amount/Tax Amount) whenever a row's breakdown is shaped that way.
+                        const hasEntryOrType = bd ? bd.some((b) => b.type != null) : false;
+                        const hasTxnAmount = bd ? bd.some((b) => b.txnAmount != null) : false;
                         return (
                           <Fragment key={i}>
                             <tr
@@ -364,8 +371,9 @@ export default function ZohoDetailReportViewer() {
                                       <thead>
                                         <tr className="text-navy-500 dark:text-navy-400 bg-navy-100/50 dark:bg-navy-800/50">
                                           <th className="text-left font-semibold py-1.5 px-3">Date</th>
-                                          <th className="text-left font-semibold py-1.5 px-3">Reference</th>
-                                          <th className="text-left font-semibold py-1.5 px-3">Customer / Vendor</th>
+                                          <th className="text-left font-semibold py-1.5 px-3">{hasEntryOrType ? 'Entry#' : 'Reference'}</th>
+                                          <th className="text-left font-semibold py-1.5 px-3">{hasEntryOrType ? 'Transaction Type' : 'Customer / Vendor'}</th>
+                                          {hasTxnAmount && <th className="text-right font-semibold py-1.5 px-3">Transaction Amount</th>}
                                           <th className="text-right font-semibold py-1.5 px-3">Tax Amount</th>
                                         </tr>
                                       </thead>
@@ -374,7 +382,10 @@ export default function ZohoDetailReportViewer() {
                                           <tr key={j} className="border-t border-navy-100 dark:border-navy-800">
                                             <td className="py-1.5 px-3 text-navy-700 dark:text-navy-200 tabular-nums">{b.date || '–'}</td>
                                             <td className="py-1.5 px-3 text-navy-700 dark:text-navy-200">{b.ref || '–'}</td>
-                                            <td className="py-1.5 px-3 text-navy-600 dark:text-navy-300">{b.source || '–'}</td>
+                                            <td className="py-1.5 px-3 text-navy-600 dark:text-navy-300">{(hasEntryOrType ? b.type : b.source) || '–'}</td>
+                                            {hasTxnAmount && (
+                                              <td className="py-1.5 px-3 text-right tabular-nums text-navy-700 dark:text-navy-200">{formatCell(b.txnAmount, { money: true }, currency)}</td>
+                                            )}
                                             <td className="py-1.5 px-3 text-right tabular-nums text-navy-800 dark:text-navy-100">{formatCell(b.amount, { money: true }, currency)}</td>
                                           </tr>
                                         ))}

@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const pool  = require('../config/db');
 const { reauthError } = require('../utils/reauthError');
 const { tableExists } = require('../utils/tableExists');
+const { currencySymbol } = require('../utils/currencySymbols');
 
 const XERO_AUTH_URL    = 'https://login.xero.com/identity/connect/authorize';
 const XERO_TOKEN_URL   = 'https://identity.xero.com/connect/token';
@@ -491,35 +492,48 @@ async function syncInvoices(userId, accessToken, tenantId) {
   if (items.length === 0) return 0;
 
   const now = new Date();
-  const rows = items.map((inv) => [
-    userId, tenantId, `xero:${inv.InvoiceID}`, inv.InvoiceID,
-    inv.InvoiceNumber || null,
-    inv.Contact?.Name || null,
-    toMysqlDate(inv.Date),
-    toMysqlDate(inv.DueDate),
-    parseFloat(inv.Total ?? 0),
-    parseFloat(inv.AmountDue ?? 0),
-    inv.Status === 'PAID' ? 'paid' : 'open',
-    now,
-  ]);
+  // Xero's Invoice entity always carries CurrencyCode (defaults to the org's
+  // own base currency when the invoice wasn't raised in a foreign one) and
+  // CurrencyRate (1.0 for base-currency invoices). No symbol field — derived
+  // via the shared ISO code→symbol map, same as QuickBooks.
+  const rows = items.map((inv) => {
+    const code = inv.CurrencyCode || null;
+    return [
+      userId, tenantId, `xero:${inv.InvoiceID}`, inv.InvoiceID,
+      inv.InvoiceNumber || null,
+      inv.Contact?.Name || null,
+      toMysqlDate(inv.Date),
+      toMysqlDate(inv.DueDate),
+      parseFloat(inv.Total ?? 0),
+      parseFloat(inv.AmountDue ?? 0),
+      inv.Status === 'PAID' ? 'paid' : 'open',
+      code, currencySymbol(code),
+      inv.CurrencyRate != null ? parseFloat(inv.CurrencyRate) : null,
+      now,
+    ];
+  });
 
   const conn = await pool.getConnection();
   try {
     await bulkInsert(conn,
       `INSERT INTO invoices
          (user_id, org_id, zoho_id, xero_id, invoice_number, customer_name,
-          date, due_date, total, balance, status, synced_at)
+          date, due_date, total, balance, status,
+          currency_code, currency_symbol, exchange_rate, synced_at)
        VALUES ?
        ON DUPLICATE KEY UPDATE
-         xero_id        = VALUES(xero_id),
-         invoice_number = VALUES(invoice_number),
-         customer_name  = VALUES(customer_name),
-         date           = VALUES(date),
-         due_date       = VALUES(due_date),
-         total          = VALUES(total),
-         balance        = VALUES(balance),
-         status         = VALUES(status),
-         synced_at      = VALUES(synced_at)`,
+         xero_id          = VALUES(xero_id),
+         invoice_number   = VALUES(invoice_number),
+         customer_name    = VALUES(customer_name),
+         date             = VALUES(date),
+         due_date         = VALUES(due_date),
+         total            = VALUES(total),
+         balance          = VALUES(balance),
+         status           = VALUES(status),
+         currency_code    = VALUES(currency_code),
+         currency_symbol  = VALUES(currency_symbol),
+         exchange_rate    = VALUES(exchange_rate),
+         synced_at        = VALUES(synced_at)`,
       rows
     );
   } finally {
@@ -773,6 +787,15 @@ async function syncManualJournals(userId, accessToken, tenantId) {
   // hasn't been applied.
   const storeRaw = await tableExists('xero_raw_transactions');
 
+  // Manual journals always post in the org's own base currency (Xero doesn't
+  // offer a foreign-currency option for them) — same reasoning as the Path B
+  // posting engine's ManualJournal handling in xeroPostingEngine.js.
+  const [[orgRow]] = await pool.execute(
+    'SELECT currency FROM xero_organizations WHERE user_id = ? AND tenant_id = ? LIMIT 1',
+    [userId, String(tenantId)]
+  ).catch(() => [[null]]);
+  const homeCurrency = orgRow?.currency || null;
+
   const now = new Date();
   const rawRows = [];
   const lineRows = [];
@@ -802,7 +825,7 @@ async function syncManualJournals(userId, accessToken, tenantId) {
         i,
         ln.TaxType || null,
         parseFloat(ln.TaxAmount ?? 0),
-        null,
+        homeCurrency,
         now,
       ]);
     }
@@ -834,7 +857,8 @@ async function syncManualJournals(userId, accessToken, tenantId) {
          reference_number=VALUES(reference_number), debit=VALUES(debit), credit=VALUES(credit),
          balance=VALUES(balance), balance_type=VALUES(balance_type),
          source_type=VALUES(source_type), source_id=VALUES(source_id), line_number=VALUES(line_number),
-         tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount), currency_code=VALUES(currency_code),
+         tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount),
+         currency_code=COALESCE(VALUES(currency_code), currency_code),
          synced_at=VALUES(synced_at)`,
       lineRows
     );
@@ -861,6 +885,13 @@ async function syncJournals(userId, accessToken, tenantId) {
   // Archive verbatim Xero JSON from the same /Journals source API that feeds
   // account_transactions. Degrades cleanly if db/raw-transactions.sql is absent.
   const storeRaw = await tableExists('xero_raw_transactions');
+  // /Journals doesn't expose a per-line currency; fall back to the org's base
+  // currency (same reasoning as syncManualJournals above) rather than null.
+  const [[orgRow]] = await pool.execute(
+    'SELECT currency FROM xero_organizations WHERE user_id = ? AND tenant_id = ? LIMIT 1',
+    [userId, String(tenantId)]
+  ).catch(() => [[null]]);
+  const homeCurrency = orgRow?.currency || null;
   const conn = await pool.getConnection();
   try {
     // eslint-disable-next-line no-constant-condition
@@ -909,7 +940,8 @@ async function syncJournals(userId, accessToken, tenantId) {
                reference_number=VALUES(reference_number), debit=VALUES(debit), credit=VALUES(credit),
                balance=VALUES(balance), balance_type=VALUES(balance_type),
                source_type=VALUES(source_type), source_id=VALUES(source_id), line_number=VALUES(line_number),
-               tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount), currency_code=VALUES(currency_code),
+               tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount),
+               currency_code=COALESCE(VALUES(currency_code), currency_code),
                synced_at=NOW()`,
             [
               userId, String(tenantId), 'xero', txnId, String(accountId),
@@ -927,7 +959,7 @@ async function syncJournals(userId, accessToken, tenantId) {
               i,
               ln.TaxType || null,
               parseFloat(ln.TaxAmount ?? 0),
-              null,
+              homeCurrency,
             ]
           );
           lineCount += 1;

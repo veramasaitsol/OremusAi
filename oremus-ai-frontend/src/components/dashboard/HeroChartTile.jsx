@@ -8,7 +8,7 @@ import { fmt, fmtMoneyCompact } from '../../utils/fmt.js';
 // Hero series values are in thousands — multiply back to full rupees for display.
 function fmtFull(v) {
   if (v == null) return '—';
-  return fmt(v * 1000);
+  return fmt(v);
 }
 
 export default function HeroChartTile({ data = [], lastYearProfit = null }) {
@@ -31,7 +31,7 @@ export default function HeroChartTile({ data = [], lastYearProfit = null }) {
   // year — so convert before comparing. `null` (badge hidden) when the prior
   // year has no synced data, never a fabricated 0.
   const hasLastYear = lastYearProfit != null;
-  const yoyGain = hasLastYear ? (totalProfit * 1000) - lastYearProfit : null;
+  const yoyGain = hasLastYear ? (totalProfit) - lastYearProfit : null;
   const yoyPct  = hasLastYear && lastYearProfit !== 0 ? (yoyGain / Math.abs(lastYearProfit)) * 100 : null;
 
   return (
@@ -46,11 +46,11 @@ export default function HeroChartTile({ data = [], lastYearProfit = null }) {
               <div className="text-[clamp(24px,3vw,40px)] font-bold tracking-tighter tabular-nums leading-none text-navy-900 dark:text-white">
                 <CountUpValue value={fmtFull(totalRev)} />
               </div>
-              {totalRev > 0 && (
+              {/* {totalRev > 0 && (
                 <div className={`text-[14px] font-semibold ${totalProfit >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
                   {totalProfit >= 0 ? '▲' : '▼'} {fmtFull(Math.abs(totalProfit))} profit
                 </div>
-              )}
+              )} */}
             </div>
             {totalRev > 0 && hasLastYear && (
               <div className={`text-[12px] font-medium ${yoyGain >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
@@ -87,7 +87,7 @@ export default function HeroChartTile({ data = [], lastYearProfit = null }) {
                   fontSize: 12,
                 }}
                 cursor={{ stroke: '#94A3B8', strokeWidth: 1, strokeDasharray: '4 3' }}
-                formatter={(v) => fmt(v * 1000)}
+                formatter={(v) => fmt(v )}
               />
               {/* Revenue — line + shaded margin zone */}
               <Area isAnimationActive={false} type="linear" dataKey="rev" name="Revenue" stroke="#2563EB" strokeWidth={2.5}
