@@ -9,6 +9,7 @@ const pool  = require('../config/db');
 const cache = require('../utils/cache');
 const { reauthError } = require('../utils/reauthError');
 const { tableExists } = require('../utils/tableExists');
+const { currencySymbol } = require('../utils/currencySymbols');
 
 // ── URL helpers ────────────────────────────────────────────────────────────────
 const QBO_TOKEN_URL  = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
@@ -184,21 +185,29 @@ async function syncInvoices(userId, accessToken, realmId, environment) {
       const total = parseFloat(inv.TotalAmt ?? 0);
       const balance = parseFloat(inv.Balance ?? 0);
       const status = balance <= 0 ? 'paid' : 'open';
+      // CurrencyRef is only present on invoices from a multi-currency-enabled
+      // company; absent otherwise, so this stays null rather than guessing USD.
+      const currencyCode = inv.CurrencyRef?.value || null;
+      const exchangeRate = inv.ExchangeRate != null ? parseFloat(inv.ExchangeRate) : null;
       await conn.execute(
         `INSERT INTO invoices
            (user_id, org_id, zoho_id, qbo_id, invoice_number, customer_name,
-            date, due_date, total, balance, status, synced_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW())
+            date, due_date, total, balance, status,
+            currency_code, currency_symbol, exchange_rate, synced_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
          ON DUPLICATE KEY UPDATE
-           qbo_id         = VALUES(qbo_id),
-           invoice_number = VALUES(invoice_number),
-           customer_name  = VALUES(customer_name),
-           date           = VALUES(date),
-           due_date       = VALUES(due_date),
-           total          = VALUES(total),
-           balance        = VALUES(balance),
-           status         = VALUES(status),
-           synced_at      = NOW()`,
+           qbo_id          = VALUES(qbo_id),
+           invoice_number  = VALUES(invoice_number),
+           customer_name   = VALUES(customer_name),
+           date            = VALUES(date),
+           due_date        = VALUES(due_date),
+           total           = VALUES(total),
+           balance         = VALUES(balance),
+           status          = VALUES(status),
+           currency_code   = VALUES(currency_code),
+           currency_symbol = VALUES(currency_symbol),
+           exchange_rate   = VALUES(exchange_rate),
+           synced_at       = NOW()`,
         [
           userId, realmId, syntheticZohoId, inv.Id,
           inv.DocNumber || null,
@@ -206,6 +215,7 @@ async function syncInvoices(userId, accessToken, realmId, environment) {
           inv.TxnDate || null,
           inv.DueDate || null,
           total, balance, status,
+          currencyCode, currencySymbol(currencyCode), exchangeRate,
         ]
       );
 
@@ -234,20 +244,26 @@ async function syncSalesReceipts(userId, accessToken, realmId, environment) {
     for (const sr of receipts) {
       const key = `qbo:sr:${sr.Id}`;
       const total = parseFloat(sr.TotalAmt ?? 0);
+      const currencyCode = sr.CurrencyRef?.value || null;
+      const exchangeRate = sr.ExchangeRate != null ? parseFloat(sr.ExchangeRate) : null;
       await conn.execute(
         `INSERT INTO invoices
            (user_id, org_id, zoho_id, qbo_id, invoice_number, customer_name,
-            date, due_date, total, balance, status, synced_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW())
+            date, due_date, total, balance, status,
+            currency_code, currency_symbol, exchange_rate, synced_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
          ON DUPLICATE KEY UPDATE
-           qbo_id         = VALUES(qbo_id),
-           invoice_number = VALUES(invoice_number),
-           customer_name  = VALUES(customer_name),
-           date           = VALUES(date),
-           total          = VALUES(total),
-           balance        = VALUES(balance),
-           status         = VALUES(status),
-           synced_at      = NOW()`,
+           qbo_id          = VALUES(qbo_id),
+           invoice_number  = VALUES(invoice_number),
+           customer_name   = VALUES(customer_name),
+           date            = VALUES(date),
+           total           = VALUES(total),
+           balance         = VALUES(balance),
+           status          = VALUES(status),
+           currency_code   = VALUES(currency_code),
+           currency_symbol = VALUES(currency_symbol),
+           exchange_rate   = VALUES(exchange_rate),
+           synced_at       = NOW()`,
         [
           userId, realmId, key, sr.Id,
           sr.DocNumber || null,
@@ -255,6 +271,7 @@ async function syncSalesReceipts(userId, accessToken, realmId, environment) {
           sr.TxnDate || null,
           sr.TxnDate || null,
           total, 0, 'paid',
+          currencyCode, currencySymbol(currencyCode), exchangeRate,
         ]
       );
       if (hasLineItems) await syncInvoiceLineItems(conn, userId, realmId, sr, key);

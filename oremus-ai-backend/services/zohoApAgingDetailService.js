@@ -364,10 +364,14 @@ async function buildApAgingSummary(userId, params = {}) {
 
   // vendor → { bucketId: amount }
   const byVendor = new Map();
+  // vendor → { bucketId: [ {name, ref, date, amount}, … ] } — the exact bills/
+  // credits behind each cell, for the click-to-drill-down below (mirrors
+  // QuickBooks' own "click a Summary cell → see its Detail rows").
+  const byVendorDrill = new Map();
   const totals = Object.fromEntries(AGING_BUCKETS.map((b) => [b.id, 0]));
   let grandTotal = 0;
 
-  const add = (vendorName, agingDate, amount) => {
+  const add = (vendorName, agingDate, amount, ref) => {
     if (!agingDate || !amount) return;
     const age = daysBetween(asOf, new Date(agingDate));
     const bucket = agingBucketFor(age);
@@ -378,6 +382,12 @@ async function buildApAgingSummary(userId, params = {}) {
     byVendor.get(vendor)[bucket.id] += amount;
     totals[bucket.id] += amount;
     grandTotal += amount;
+    if (!byVendorDrill.has(vendor)) {
+      byVendorDrill.set(vendor, Object.fromEntries(AGING_BUCKETS.map((b) => [b.id, []])));
+    }
+    byVendorDrill.get(vendor)[bucket.id].push({
+      name: vendor, ref: ref || '', date: fmtDate(new Date(agingDate)), amount: round2(amount),
+    });
   };
 
   for (const bill of bills) {
@@ -385,13 +395,13 @@ async function buildApAgingSummary(userId, params = {}) {
     if (bill.date && new Date(bill.date) > asOf) continue;
     // A bill with no due date is due on receipt (that's how the providers treat
     // it) — never drop it, or the grand total stops matching the platform.
-    add(bill.vendor_name, agingByBillDate ? bill.date : (bill.due_date || bill.date), bill._balanceAsOf);
+    add(bill.vendor_name, agingByBillDate ? bill.date : (bill.due_date || bill.date), bill._balanceAsOf, bill.bill_number);
   }
 
   // Unapplied vendor credits reduce what's owed, exactly as they do on the
   // platform's own report (a credit note has no due date — it ages by its date).
   for (const c of await fetchUnallocatedVendorCredits(userId, orgId, asOf)) {
-    add(c.vendor, c.date, c.amount);
+    add(c.vendor, c.date, c.amount, 'Vendor Credit');
   }
 
   const rows = [];
@@ -399,15 +409,20 @@ async function buildApAgingSummary(userId, params = {}) {
   for (const vendor of vendors) {
     const v = byVendor.get(vendor);
     const cells = {};
+    const cellDrill = {};
     // Empty buckets render BLANK (not 0.00) like Xero/QuickBooks do — with nine
     // aging columns a wall of zeros hides the amounts that matter. The TOTAL row
     // below keeps real 0.00s so every column still foots.
     for (const k of AGING_BUCKETS) {
       const v2 = round2(v[k.id]);
       cells[k.id] = v2 === 0 ? '' : v2;
+      const entries = byVendorDrill.get(vendor)?.[k.id];
+      if (entries && entries.length) cellDrill[k.id] = entries;
     }
     cells.total = round2(AGING_BUCKETS.reduce((s, k) => s + v[k.id], 0));
-    rows.push({ label: vendor, level: 1, cells });
+    const allEntries = AGING_BUCKETS.flatMap((k) => byVendorDrill.get(vendor)?.[k.id] || []);
+    if (allEntries.length) cellDrill.total = allEntries;
+    rows.push({ label: vendor, level: 1, cells, cellDrill });
   }
 
   const totalCells = {};

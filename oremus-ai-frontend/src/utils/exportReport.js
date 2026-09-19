@@ -50,6 +50,17 @@ export function exportReportCSV(data, reportName) {
   downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `${buildFileName(reportName)}.csv`);
 }
 
+// Export an arbitrary small row set to CSV — for a drill-down/breakdown panel
+// (a tax rate's contributing invoices, a cell's underlying bills, …) rather
+// than a full { columns, rows } report. `headers` is a plain string array;
+// `rows` an array of same-length value arrays.
+export function exportRowsCSV(headers, rows, filename) {
+  if (!rows?.length) return;
+  const aoa = [headers, ...rows];
+  const csv = '﻿' + aoa.map((row) => row.map(csvEscape).join(',')).join('\r\n');
+  downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `${buildFileName(filename)}.csv`);
+}
+
 export async function exportReportXLSX(data, reportName) {
   if (!data) return;
   const XLSX = await import('xlsx');

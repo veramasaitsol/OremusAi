@@ -144,23 +144,31 @@ async function syncInvoices(userId, accessToken, orgId) {
       await conn.execute(
         `INSERT INTO invoices
            (user_id, org_id, zoho_id, invoice_number, customer_name,
-            date, due_date, total, balance, status, synced_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,NOW())
+            date, due_date, total, balance, status,
+            currency_id, currency_code, currency_symbol, exchange_rate, synced_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
          ON DUPLICATE KEY UPDATE
-           invoice_number = VALUES(invoice_number),
-           customer_name  = VALUES(customer_name),
-           date           = VALUES(date),
-           due_date       = VALUES(due_date),
-           total          = VALUES(total),
-           balance        = VALUES(balance),
-           status         = VALUES(status),
-           synced_at      = NOW()`,
+           invoice_number  = VALUES(invoice_number),
+           customer_name   = VALUES(customer_name),
+           date            = VALUES(date),
+           due_date        = VALUES(due_date),
+           total           = VALUES(total),
+           balance         = VALUES(balance),
+           status          = VALUES(status),
+           currency_id     = VALUES(currency_id),
+           currency_code   = VALUES(currency_code),
+           currency_symbol = VALUES(currency_symbol),
+           exchange_rate   = VALUES(exchange_rate),
+           synced_at       = NOW()`,
         [
           userId, orgId, inv.invoice_id,
           inv.invoice_number || null, inv.customer_name || null,
           inv.date || null, inv.due_date || null,
           parseFloat(inv.total ?? 0), parseFloat(inv.balance ?? 0),
           inv.status || null,
+          inv.currency_id || null, inv.currency_code || null,
+          inv.currency_symbol || null,
+          inv.exchange_rate != null ? parseFloat(inv.exchange_rate) : null,
         ]
       );
     }

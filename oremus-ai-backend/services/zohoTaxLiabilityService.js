@@ -546,6 +546,27 @@ async function buildTaxLiability(userId, params = {}) {
     [userId, orgId, from, to]
   );
 
+  // A vendor credit is a negative purchase — it reduces the ITC claimed on the
+  // bill(s) it offsets, so it nets the OPPOSITE way a bill does (positive, like
+  // an invoice) — same relationship a credit note has to an invoice, mirrored
+  // onto the input side.
+  const [vendorCreditDocs] = await pool.execute(
+    `SELECT li.zoho_vendor_credit_id AS doc_id, li.tax_id, li.tax_name, li.tax_type,
+            MAX(li.tax_percentage) AS tax_percentage,
+            SUM(li.item_total) AS taxable,
+            MAX(vc.vendor_credit_number) AS doc_number, MAX(vc.date) AS doc_date
+       FROM zb_vendor_credit_line_items li
+       JOIN zb_vendor_credits vc
+         ON vc.zoho_vendor_credit_id = li.zoho_vendor_credit_id
+        AND vc.org_id = li.org_id AND vc.user_id = li.user_id
+      WHERE li.user_id = ? AND li.org_id = ?
+        AND LOWER(COALESCE(vc.status, '')) NOT IN ('draft', 'void')
+        AND vc.date BETWEEN ? AND ?
+        AND (COALESCE(li.tax_id, '') <> '' OR COALESCE(li.tax_name, '') <> '')
+      GROUP BY li.zoho_vendor_credit_id, li.tax_id, li.tax_name, li.tax_type`,
+    [userId, orgId, from, to]
+  );
+
   const statuses = await taxStatuses(userId, orgId);
   const currency = await getBaseCurrency(orgId);
 
@@ -557,6 +578,7 @@ async function buildTaxLiability(userId, params = {}) {
     ...docs.map((d) => ({ ...d, docType: 'Invoice' })),
     ...creditDocs.map((d) => ({ ...d, docType: 'Credit Note' })),
     ...billDocs.map((d) => ({ ...d, docType: 'Bill' })),
+    ...vendorCreditDocs.map((d) => ({ ...d, docType: 'Vendor Credit' })),
   ];
   const levies = new Map();
   for (const d of taggedDocs) {

@@ -14,7 +14,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   ArrowLeft, X, ChevronDown, Plus, RefreshCw, ChevronRight,
-  SlidersHorizontal, CalendarClock, Table2, BarChart3,
+  SlidersHorizontal, CalendarClock, Table2, BarChart3, Download,
 } from 'lucide-react';
 import Popover from '../ui/Popover.jsx';
 import ExportMenu from './ExportMenu.jsx';
@@ -28,6 +28,7 @@ import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { exportRowsCSV } from '../../utils/exportReport.js';
 
 const ZOHO_BLUE = '#2563eb';
 
@@ -346,6 +347,26 @@ export default function ZohoDetailReportViewer() {
                               <tr className="bg-navy-50/60 dark:bg-navy-900/40">
                                 <td colSpan={columns.length} className="px-4 pb-3 pt-1">
                                   <div className="rounded-md border border-navy-200 dark:border-navy-700 overflow-hidden">
+                                    <div className="px-3 py-1.5 border-b border-navy-100 dark:border-navy-800 flex items-center justify-end bg-navy-100/50 dark:bg-navy-800/50">
+                                      <button
+                                        type="button"
+                                        onClick={() => exportRowsCSV(
+                                          [
+                                            'Date', hasEntryOrType ? 'Entry#' : 'Reference',
+                                            hasEntryOrType ? 'Transaction Type' : 'Customer / Vendor',
+                                            ...(hasTxnAmount ? ['Transaction Amount'] : []), 'Tax Amount',
+                                          ],
+                                          bd.map((b) => [
+                                            b.date || '', b.ref || '', (hasEntryOrType ? b.type : b.source) || '',
+                                            ...(hasTxnAmount ? [b.txnAmount ?? ''] : []), b.amount ?? '',
+                                          ]),
+                                          `${r.cells?.taxName || r.label || 'Breakdown'}`,
+                                        )}
+                                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-navy-600 dark:text-navy-300 hover:text-brand-600"
+                                      >
+                                        <Download size={12} /> Export
+                                      </button>
+                                    </div>
                                     <table className="w-full text-[12px]">
                                       <thead>
                                         <tr className="text-navy-500 dark:text-navy-400 bg-navy-100/50 dark:bg-navy-800/50">

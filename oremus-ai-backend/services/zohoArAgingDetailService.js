@@ -14,6 +14,7 @@
 
 const pool = require('../config/db');
 const { attachAsOfBalances } = require('./salesArFromInvoicesService');
+const { getBaseCurrency } = require('./zohoChartOfAccountsService');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute(
@@ -115,7 +116,7 @@ async function buildArAgingDetail(userId, params = {}) {
   // rewinds post-as-of payments to recover the historical balance.
   const [invoices] = await pool.execute(
     `SELECT invoice_number, customer_name, status, date, due_date,
-            total, balance, currency_code
+            total, balance, currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN
@@ -125,8 +126,20 @@ async function buildArAgingDetail(userId, params = {}) {
   );
 
   await attachAsOfBalances(invoices, userId, orgId, asOf);
+  // total/_balanceAsOf are still native to each invoice's own currency at this
+  // point — attachAsOfBalances' payment/credit-note rewinding runs entirely in
+  // that native currency. Convert to the org's base currency only now, so both
+  // the displayed row and every bucket subtotal/grand total below agree.
+  for (const inv of invoices) {
+    const rate = num(inv.exchange_rate) || 1;
+    inv.total = round2(inv.total * rate);
+    inv._balanceAsOf = round2(inv._balanceAsOf * rate);
+  }
 
-  const currency = invoices.find((r) => r.currency_code)?.currency_code || 'INR';
+  // Always the org's base/reporting currency, never a per-invoice code — every
+  // amount here is already converted to it, so a multi-currency org's totals
+  // still foot correctly.
+  const currency = await getBaseCurrency(orgId);
 
   // Standalone unapplied / overpayment customer-Payment credits still reduce a
   // customer's true outstanding receivable. QuickBooks' own Aged Receivable
@@ -142,20 +155,22 @@ async function buildArAgingDetail(userId, params = {}) {
   // only synthetic (non-Zoho) payment rows qualify: real Zoho payment ids are
   // bare numeric strings, while ours are prefixed `qbo:`/`xero:` (contain ':').
   const [creditPayments] = await pool.execute(
-    `SELECT customer_name, date, amount, unused_amount
+    `SELECT customer_name, date, amount, unused_amount, exchange_rate
        FROM zb_customer_payments
       WHERE user_id = ? AND org_id = ? AND date <= ? AND unused_amount <> 0
         AND zoho_payment_id LIKE '%:%'`,
     [userId, orgId, ymd(asOf)]
   );
   for (const p of creditPayments) {
+    // The payment's own rate — it isn't necessarily tied to any one invoice.
+    const rate = num(p.exchange_rate) || 1;
     invoices.push({
       invoice_number: '',
       customer_name: p.customer_name,
       date: p.date,
       due_date: p.date,
-      total: -num(p.amount),
-      _balanceAsOf: -num(p.unused_amount),
+      total: round2(-num(p.amount) * rate),
+      _balanceAsOf: round2(-num(p.unused_amount) * rate),
       _isPayment: true,
     });
   }
