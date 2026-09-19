@@ -7,6 +7,7 @@ import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { cn } from '../../utils/classNames.js';
 import AccountLedgerModal from './AccountLedgerModal.jsx';
 import SourceDocumentModal from './SourceDocumentModal.jsx';
+import BreakdownModal from './BreakdownModal.jsx';
 
 // `numberFormat` maps the "Number format" filter (indian/international) to
 // the locale `fmt` should group digits with, overriding the currency default
@@ -84,6 +85,13 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
   const [ledger, setLedger] = useState(null);  // { accountRef, accountName }
   const [source, setSource] = useState(null);  // { sourceType, sourceRef }
   const [drillPage, setDrillPage] = useState({});  // pagination for inline drill-down
+  // Cell-level "how was this calculated" popup — AR/AP Aging Summary's
+  // customer/vendor × bucket cells and Aging Detail's Balance column both
+  // carry a `cellDrill` map (column key -> contributing entries) on their
+  // row; clicking that cell's amount opens this modal instead of pushing an
+  // inline panel into the table, the way the account-ledger/source-document
+  // drills above already work.
+  const [breakdownModal, setBreakdownModal] = useState(null);  // { title, entries }
 
   // Resolve the report's active date range so the account ledger drill scopes
   // to the same period the report was run for.
@@ -191,6 +199,16 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
         sourceRef={source?.sourceRef}
         currency={currency}
       />
+      <BreakdownModal
+        open={!!breakdownModal}
+        onClose={() => setBreakdownModal(null)}
+        title={breakdownModal?.title}
+        subtitle={breakdownModal?.subtitle}
+        entries={breakdownModal?.entries || []}
+        currency={currency}
+        decimals={decimals}
+        numLocale={numLocale}
+      />
     </>
   );
 
@@ -289,6 +307,10 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                       const isLabel = ci === 0;
                       const v = isLabel ? r.label : (r.cells?.[c.key] ?? '');
                       const isAccountClickable = isLabel && !!r.accountRef && !isHeader && !isTotal;
+                      // AR/AP Aging Summary's bucket cells and Aging Detail's
+                      // Balance column: this ONE amount has its own "how was
+                      // this calculated" entries — click it to open the modal.
+                      const cellEntries = !isLabel ? r.cellDrill?.[c.key] : null;
                       return (
                         <td
                           key={c.key}
@@ -330,6 +352,14 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                             </button>
                           ) : isLabel ? (
                             v
+                          ) : cellEntries?.length ? (
+                            <button
+                              type="button"
+                              onClick={() => setBreakdownModal({ title: `${r.label} — ${c.label}`, entries: cellEntries })}
+                              className="text-brand-600 hover:underline tabular-nums"
+                            >
+                              {qbAmount(v, emphasize && c.money !== false)}
+                            </button>
                           ) : (
                             qbAmount(v, emphasize && c.money !== false)
                           )}

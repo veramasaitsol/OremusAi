@@ -115,11 +115,16 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
   const byNum = new Map();
   for (const inv of invoices) {
     inv._balanceAsOf = num(inv.balance);
+    // Every step that moves _balanceAsOf away from the live `balance` is
+    // recorded here too — this is what the AR Aging Detail "Balance" column's
+    // click-through breakdown shows: exactly how the as-of figure was
+    // reconstructed, not just the final number.
+    inv._breakdown = [{ name: inv.customer_name || null, ref: inv.invoice_number || null, date: null, type: 'Current balance', amount: inv._balanceAsOf }];
     if (inv.invoice_number) byNum.set(String(inv.invoice_number).trim(), inv);
   }
 
   const [payments] = await pool.execute(
-    `SELECT amount, unused_amount, invoice_numbers
+    `SELECT amount, unused_amount, invoice_numbers, date, payment_number
        FROM zb_customer_payments
       WHERE user_id = ? AND org_id = ? AND date > ?`,
     [userId, orgId, ymd(asOf)]
@@ -133,14 +138,21 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
       if (!inv) continue;
       const room = Math.max(0, num(inv.total) - inv._balanceAsOf);
       const give = Math.min(room, applied);
-      inv._balanceAsOf += give;
+      if (give > 0) {
+        inv._balanceAsOf += give;
+        inv._breakdown.push({
+          name: inv.customer_name || null, ref: p.payment_number || 'Payment',
+          date: p.date ? String(p.date).slice(0, 10) : null,
+          type: 'Payment reversed (settled after as-of date)', amount: give,
+        });
+      }
       applied -= give;
       if (applied <= 0) break;
     }
   }
 
   const [creditNotes] = await pool.execute(
-    `SELECT total, balance, invoice_number
+    `SELECT total, balance, invoice_number, date, creditnote_number
        FROM zb_credit_notes
       WHERE user_id = ? AND org_id = ? AND date > ?
         AND invoice_number IS NOT NULL AND invoice_number <> ''`,
@@ -152,7 +164,15 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
     const inv = byNum.get(String(cn.invoice_number).trim());
     if (!inv) continue;
     const room = Math.max(0, num(inv.total) - inv._balanceAsOf);
-    inv._balanceAsOf += Math.min(room, applied);
+    const give = Math.min(room, applied);
+    if (give > 0) {
+      inv._balanceAsOf += give;
+      inv._breakdown.push({
+        name: inv.customer_name || null, ref: cn.creditnote_number || 'Credit Note',
+        date: cn.date ? String(cn.date).slice(0, 10) : null,
+        type: 'Credit note reversed (applied after as-of date)', amount: give,
+      });
+    }
   }
 }
 
@@ -729,6 +749,16 @@ async function buildArAgingSummary(userId, params = {}) {
 
   // customer → { bucketId: amount }
   const byCustomer = new Map();
+  // customer → { bucketId: [ {name, ref, date, amount}, … ] } — the exact
+  // invoices/credits behind each cell, for the click-to-drill-down below
+  // (mirrors QuickBooks' own "click a Summary cell → see its Detail rows").
+  const byCustomerDrill = new Map();
+  const drillFor = (customer, bucketId) => {
+    if (!byCustomerDrill.has(customer)) {
+      byCustomerDrill.set(customer, Object.fromEntries(BUCKETS.map((b) => [b.id, []])));
+    }
+    return byCustomerDrill.get(customer)[bucketId];
+  };
   const totals = Object.fromEntries(BUCKETS.map((b) => [b.id, 0]));
   let grandTotal = 0;
 
@@ -753,6 +783,9 @@ async function buildArAgingSummary(userId, params = {}) {
     byCustomer.get(customer)[bucket.id] += bal;
     totals[bucket.id] += bal;
     grandTotal += bal;
+    drillFor(customer, bucket.id).push({
+      name: customer, ref: inv.invoice_number || '', date: fmtDate(new Date(agingDate)), amount: round2(bal),
+    });
   }
 
   // Standalone unapplied / overpayment customer-Payment credits still reduce a
@@ -781,6 +814,9 @@ async function buildArAgingSummary(userId, params = {}) {
     byCustomer.get(customer)[bucket.id] += credit;
     totals[bucket.id] += credit;
     grandTotal += credit;
+    drillFor(customer, bucket.id).push({
+      name: customer, ref: 'Unapplied Credit', date: fmtDate(new Date(p.date)), amount: credit,
+    });
   }
 
   const rows = [];
@@ -788,15 +824,20 @@ async function buildArAgingSummary(userId, params = {}) {
   for (const customer of customers) {
     const b = byCustomer.get(customer);
     const cells = {};
+    const cellDrill = {};
     // Empty buckets render BLANK (not 0.00) like Xero/QuickBooks do — with nine
     // aging columns a wall of zeros hides the amounts that matter. The TOTAL row
     // below keeps real 0.00s so every column still foots.
     for (const k of BUCKETS) {
       const v = round2(b[k.id]);
       cells[k.id] = v === 0 ? '' : v;
+      const entries = byCustomerDrill.get(customer)?.[k.id];
+      if (entries && entries.length) cellDrill[k.id] = entries;
     }
     cells.total = round2(BUCKETS.reduce((s, k) => s + b[k.id], 0));
-    rows.push({ label: customer, level: 1, cells });
+    const allEntries = BUCKETS.flatMap((k) => byCustomerDrill.get(customer)?.[k.id] || []);
+    if (allEntries.length) cellDrill.total = allEntries;
+    rows.push({ label: customer, level: 1, cells, cellDrill });
   }
 
   const totalCells = {};

@@ -167,6 +167,7 @@ async function buildApAgingDetail(userId, params = {}) {
       dueDate: fmtDateUS(bill.due_date || bill.date),
       amount: num(bill.total),
       balance: bill._balanceAsOf,
+      breakdown: bill._breakdown,
     }, basis);
   }
 
@@ -203,6 +204,10 @@ async function buildApAgingDetail(userId, params = {}) {
     rows.push({ label: bucket.label, isHeader: true, level: 0, cells: {} });
 
     for (const d of items) {
+      // The Balance column is a reconstructed, as-of-date figure — clicking it
+      // opens the same breakdown modal AP Aging Summary's cells use, showing
+      // the GL postings (payments, vendor credits, adjustments) it's built from.
+      const cellDrill = d.breakdown?.length ? { balance: d.breakdown } : undefined;
       rows.push({
         label: fmtDateUS(d.date),
         level: 1,
@@ -217,6 +222,7 @@ async function buildApAgingDetail(userId, params = {}) {
           amount: round2(d.amount),
           balance: round2(d.balance),
         },
+        cellDrill,
       });
     }
 
@@ -364,10 +370,14 @@ async function buildApAgingSummary(userId, params = {}) {
 
   // vendor → { bucketId: amount }
   const byVendor = new Map();
+  // vendor → { bucketId: [ {name, ref, date, amount}, … ] } — the exact bills/
+  // credits behind each cell, for the click-to-drill-down below (mirrors
+  // QuickBooks' own "click a Summary cell → see its Detail rows").
+  const byVendorDrill = new Map();
   const totals = Object.fromEntries(AGING_BUCKETS.map((b) => [b.id, 0]));
   let grandTotal = 0;
 
-  const add = (vendorName, agingDate, amount) => {
+  const add = (vendorName, agingDate, amount, ref) => {
     if (!agingDate || !amount) return;
     const age = daysBetween(asOf, new Date(agingDate));
     const bucket = agingBucketFor(age);
@@ -378,6 +388,12 @@ async function buildApAgingSummary(userId, params = {}) {
     byVendor.get(vendor)[bucket.id] += amount;
     totals[bucket.id] += amount;
     grandTotal += amount;
+    if (!byVendorDrill.has(vendor)) {
+      byVendorDrill.set(vendor, Object.fromEntries(AGING_BUCKETS.map((b) => [b.id, []])));
+    }
+    byVendorDrill.get(vendor)[bucket.id].push({
+      name: vendor, ref: ref || '', date: fmtDate(new Date(agingDate)), amount: round2(amount),
+    });
   };
 
   for (const bill of bills) {
@@ -385,13 +401,13 @@ async function buildApAgingSummary(userId, params = {}) {
     if (bill.date && new Date(bill.date) > asOf) continue;
     // A bill with no due date is due on receipt (that's how the providers treat
     // it) — never drop it, or the grand total stops matching the platform.
-    add(bill.vendor_name, agingByBillDate ? bill.date : (bill.due_date || bill.date), bill._balanceAsOf);
+    add(bill.vendor_name, agingByBillDate ? bill.date : (bill.due_date || bill.date), bill._balanceAsOf, bill.bill_number);
   }
 
   // Unapplied vendor credits reduce what's owed, exactly as they do on the
   // platform's own report (a credit note has no due date — it ages by its date).
   for (const c of await fetchUnallocatedVendorCredits(userId, orgId, asOf)) {
-    add(c.vendor, c.date, c.amount);
+    add(c.vendor, c.date, c.amount, 'Vendor Credit');
   }
 
   const rows = [];
@@ -399,15 +415,20 @@ async function buildApAgingSummary(userId, params = {}) {
   for (const vendor of vendors) {
     const v = byVendor.get(vendor);
     const cells = {};
+    const cellDrill = {};
     // Empty buckets render BLANK (not 0.00) like Xero/QuickBooks do — with nine
     // aging columns a wall of zeros hides the amounts that matter. The TOTAL row
     // below keeps real 0.00s so every column still foots.
     for (const k of AGING_BUCKETS) {
       const v2 = round2(v[k.id]);
       cells[k.id] = v2 === 0 ? '' : v2;
+      const entries = byVendorDrill.get(vendor)?.[k.id];
+      if (entries && entries.length) cellDrill[k.id] = entries;
     }
     cells.total = round2(AGING_BUCKETS.reduce((s, k) => s + v[k.id], 0));
-    rows.push({ label: vendor, level: 1, cells });
+    const allEntries = AGING_BUCKETS.flatMap((k) => byVendorDrill.get(vendor)?.[k.id] || []);
+    if (allEntries.length) cellDrill.total = allEntries;
+    rows.push({ label: vendor, level: 1, cells, cellDrill });
   }
 
   const totalCells = {};
@@ -461,7 +482,13 @@ async function buildApAgingSummary(userId, params = {}) {
 // live balance unadjusted, exactly the pre-fix behaviour, for that bill only.
 // Sets `_balanceAsOf` on every bill row.
 async function attachAsOfBillBalances(bills, userId, orgId, asOf) {
-  for (const bill of bills) bill._balanceAsOf = num(bill.balance);
+  for (const bill of bills) {
+    bill._balanceAsOf = num(bill.balance);
+    // The AP Aging Detail "Balance" column's click-through breakdown starts
+    // here — replaced below with the actual GL postings for any bill whose
+    // ledger-reconstructed figure is trusted (see the self-validation below).
+    bill._breakdown = [{ name: bill.vendor_name || null, ref: bill.bill_number || null, date: null, type: 'Current balance', amount: bill._balanceAsOf }];
+  }
 
   const cutoff = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} 23:59:59`;
   const [rows] = await pool.execute(
@@ -480,12 +507,40 @@ async function attachAsOfBillBalances(bills, userId, orgId, asOf) {
     const key = `${(r.transaction_number || '').trim()}␟${(r.transaction_details || '').trim()}`;
     byKey.set(key, { asOf: num(r.balance_as_of), today: num(r.balance_today) });
   }
+
+  // Individual (non-aggregated) postings, only fetched to back the "how was
+  // this calculated" breakdown — the trust-check above already decided which
+  // bills' as-of figure is reliable using the aggregate query.
+  const [postings] = await pool.execute(
+    `SELECT transaction_number, transaction_details, transaction_date,
+            transaction_type, source_type, reference_number, credit, debit
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ? AND account_type_code = 'accounts_payable'
+        AND transaction_id NOT LIKE 'xero-recon:%'
+        AND transaction_date <= ?
+      ORDER BY transaction_date`,
+    [userId, orgId, cutoff]
+  );
+  const postingsByKey = new Map();
+  for (const r of postings) {
+    const key = `${(r.transaction_number || '').trim()}␟${(r.transaction_details || '').trim()}`;
+    if (!postingsByKey.has(key)) postingsByKey.set(key, []);
+    postingsByKey.get(key).push(r);
+  }
+
   for (const bill of bills) {
     const key = `${(bill.bill_number || '').trim()}␟${(bill.vendor_name || '').trim()}`;
     const ledger = byKey.get(key);
     if (!ledger) continue; // no ledger postings traced to this bill at all — keep live balance
     if (Math.abs(ledger.today - num(bill.balance)) > 0.5) continue; // doesn't reconcile — untrusted for this bill, keep live balance
     bill._balanceAsOf = ledger.asOf;
+    bill._breakdown = (postingsByKey.get(key) || []).map((r) => ({
+      name: bill.vendor_name || null,
+      ref: r.reference_number || bill.bill_number || null,
+      date: r.transaction_date ? String(r.transaction_date).slice(0, 10) : null,
+      type: r.transaction_type || r.source_type || 'GL Posting',
+      amount: round2(num(r.credit) - num(r.debit)),
+    }));
   }
 }
 
