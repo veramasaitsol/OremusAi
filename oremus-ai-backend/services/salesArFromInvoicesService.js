@@ -191,61 +191,40 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
 // ─── Sales by Customer ──────────────────────────────────────────────────────
 // Built from `account_transactions` (shared ledger) instead of `invoices` so
 // that tax is always included in the total — even for Xero and QuickBooks where
-// the `invoices.tax_total` column is 0.  Income-account credits for ACCREC
-// entries carry the full sale amount inclusive of tax; ACCRECCREDIT lines reduce
-// the total (credit notes / refunds).
+// the `invoices.tax_total` column is 0.
+//
+// The sale's true, tax-inclusive value is every NON-ASSET line the document
+// posts (income, tax-liability, and any contra-revenue/expense-classified
+// line a platform's chart of accounts routes part of a credit note through —
+// confirmed against a live Zoho org's own "Sales by Customer" report) — never
+// just the account_group = 'income' lines alone, which silently drops
+// whichever portion of a document lands on a differently-classified account.
+// This also works out to be the platform-agnostic formula: whatever the
+// asset-side of a balanced document settles to (Accounts Receivable for a
+// still-open invoice, straight to a bank/cash account for one posted as
+// already paid — Xero's posting engine does this for some documents), the
+// non-asset side is always its exact negation, so summing it needs no
+// per-platform branching or asset-account-type guessing.
 async function buildSalesByCustomer(userId, params = {}) {
   const orgId = params.org_id || null;
   requireOrg(orgId);
   const { from, to } = resolveRange(params);
-  const platform = params.platform ? String(params.platform).toLowerCase() : null;
 
-  // Primary: account_transactions (works for all 3 platforms).
-  // Zoho sometimes posts invoice tax as separate liability lines (GST/IGST/CGST),
-  // so when reporting for Zoho include those tax lines in the per-customer total.
-  let txnGrouped;
-  if (platform === 'zoho') {
-    const [rows] = await pool.execute(
-      `SELECT COALESCE(NULLIF(TRIM(at.transaction_details), ''), 'Unknown') AS customer,
-              COUNT(DISTINCT at.source_id) AS cnt,
-              ROUND(SUM(
-                CASE
-                  WHEN at.account_group = 'income' THEN at.credit - at.debit
-                  WHEN LOWER(COALESCE(at.account_name, '')) REGEXP 'gst|cgst|sgst|igst|tax' THEN at.credit - at.debit
-                  ELSE 0
-                END
-              ), 2) AS total,
-              MAX(at.currency_code) AS currency
-         FROM account_transactions at
-        WHERE at.user_id = ? AND at.org_id = ?
-          AND at.source_type IN (${inList(SALES_DOC_TYPES)})
-          AND at.transaction_date BETWEEN ? AND ?
-        GROUP BY customer
-        ORDER BY total DESC`,
-      [userId, orgId, ...SALES_DOC_TYPES, from, to]
-    );
-    txnGrouped = rows;
-  } else {
-    const [rows] = await pool.execute(
-      `SELECT COALESCE(NULLIF(TRIM(at.transaction_details), ''), 'Unknown') AS customer,
-              COUNT(DISTINCT at.source_id) AS cnt,
-              ROUND(SUM(
-                CASE WHEN at.account_group = 'income'
-                  THEN at.credit - at.debit
-                  ELSE 0
-                END
-              ), 2) AS total,
-              MAX(at.currency_code) AS currency
-         FROM account_transactions at
-        WHERE at.user_id = ? AND at.org_id = ?
-          AND at.source_type IN (${inList(SALES_DOC_TYPES)})
-          AND at.transaction_date BETWEEN ? AND ?
-        GROUP BY customer
-        ORDER BY total DESC`,
-      [userId, orgId, ...SALES_DOC_TYPES, from, to]
-    );
-    txnGrouped = rows;
-  }
+  // Primary: account_transactions (works for all 3 platforms, one query).
+  const [txnGrouped] = await pool.execute(
+    `SELECT COALESCE(NULLIF(TRIM(at.transaction_details), ''), 'Unknown') AS customer,
+            COUNT(DISTINCT CASE WHEN at.source_type IN (${inList(SALES_INVOICE_TYPES)})
+                                 THEN at.source_id END) AS cnt,
+            ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS total,
+            MAX(at.currency_code) AS currency
+       FROM account_transactions at
+      WHERE at.user_id = ? AND at.org_id = ?
+        AND at.source_type IN (${inList(SALES_DOC_TYPES)})
+        AND at.transaction_date BETWEEN ? AND ?
+      GROUP BY customer
+      ORDER BY total DESC`,
+    [...SALES_INVOICE_TYPES, userId, orgId, ...SALES_DOC_TYPES, from, to]
+  );
 
   // Fallback: invoices table (for connections that haven't synced ledger lines
   // yet — e.g. a brand-new Zoho connection before first sync).
@@ -319,26 +298,30 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
 
   const { from, to } = resolveRange(params);
 
-  // Primary: account_transactions (invoice / credit-note income lines — see
-  // SALES_DOC_TYPES for each platform's own source_type spelling).
-  // Each invoice has one income-account line per entry; group by source_id to
-  // get per-invoice totals, then nest under customer.
+  // Primary: account_transactions (invoice / credit-note documents — see
+  // SALES_DOC_TYPES for each platform's own source_type spelling). A document's
+  // true, tax-inclusive value is every NON-ASSET line it posts (income,
+  // tax-liability, any contra-revenue-classified line) — never just its
+  // account_group = 'income' line(s) alone, which silently drops whatever
+  // portion lands on a differently-classified account (see buildSalesByCustomer
+  // for the full reasoning) — so group by source_id first to get one correct,
+  // fully-summed row per document, then nest under customer.
   const [txnRows] = await pool.execute(
     `SELECT at.transaction_details AS customer,
             at.source_id,
-            at.reference_number AS invoice_number,
-            DATE_FORMAT(at.transaction_date, '%Y-%m-%d') AS d,
-            at.account_name AS product,
+            MAX(at.reference_number) AS invoice_number,
+            DATE_FORMAT(MAX(at.transaction_date), '%Y-%m-%d') AS d,
+            MAX(at.account_name) AS product,
             at.transaction_details AS description,
-            ROUND(at.credit - at.debit, 2) AS amount,
-            at.currency_code,
-            at.source_type
+            ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS amount,
+            MAX(at.currency_code) AS currency_code,
+            MAX(at.source_type) AS source_type
        FROM account_transactions at
       WHERE at.user_id = ? AND at.org_id = ?
         AND at.source_type IN (${inList(SALES_DOC_TYPES)})
-        AND at.account_group = 'income'
         AND at.transaction_date BETWEEN ? AND ?
-      ORDER BY at.transaction_details, at.transaction_date, at.reference_number`,
+      GROUP BY at.source_id, at.transaction_details
+      ORDER BY at.transaction_details, d, invoice_number`,
     [userId, orgId, ...SALES_DOC_TYPES, from, to]
   );
 

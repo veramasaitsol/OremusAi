@@ -94,13 +94,17 @@ export function normalizeAIResponse(raw) {
 
   if (typeof raw.data === 'string') {
     // HTML-wrapped answer (the service's current format).
+    // Preserve the raw HTML so the UI can render it directly.
+    out.rawHtml = raw.data;
     const { text, rows } = parseHtmlPayload(raw.data);
     out.answer = raw.answer ?? text;
     out.data = rows; // null unless the HTML contained a <table>
   } else if (Array.isArray(raw.data)) {
     out.data = raw.data; // already a row set
+    out.rawHtml = null;
   } else {
     out.data = null;
+    out.rawHtml = null;
   }
 
   if (out.answer == null) out.answer = extractAnswer(raw);
