@@ -7,7 +7,7 @@ import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { cn } from '../../utils/classNames.js';
 import AccountLedgerModal from './AccountLedgerModal.jsx';
 import SourceDocumentModal from './SourceDocumentModal.jsx';
-import { exportRowsCSV } from '../../utils/exportReport.js';
+import BreakdownModal from './BreakdownModal.jsx';
 
 // `numberFormat` maps the "Number format" filter (indian/international) to
 // the locale `fmt` should group digits with, overriding the currency default
@@ -99,16 +99,6 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
   const [ledger, setLedger] = useState(null);  // { accountRef, accountName }
   const [source, setSource] = useState(null);  // { sourceType, sourceRef }
   const [drillPage, setDrillPage] = useState({});  // pagination for inline drill-down
-  // Per-CELL drill-down (AR/AP Aging Summary's customer/vendor × bucket matrix —
-  // the click target is one cell, not the whole row) — keyed by `${rowIdx}:${colKey}`
-  // so several cells, in the same or different rows, can be open at once.
-  const [expandedCell, setExpandedCell] = useState({});
-  const [cellPage, setCellPage] = useState({});
-  const CELL_DRILL_PAGE_SIZE = 10;
-  const toggleCell = (key) => {
-    setExpandedCell((m) => ({ ...m, [key]: !m[key] }));
-    setCellPage((p) => ({ ...p, [key]: 0 }));
-  };
 
   // Resolve the report's active date range so the account ledger drill scopes
   // to the same period the report was run for.
@@ -215,6 +205,16 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
         sourceType={source?.sourceType}
         sourceRef={source?.sourceRef}
         currency={currency}
+      />
+      <BreakdownModal
+        open={!!breakdownModal}
+        onClose={() => setBreakdownModal(null)}
+        title={breakdownModal?.title}
+        subtitle={breakdownModal?.subtitle}
+        entries={breakdownModal?.entries || []}
+        currency={currency}
+        decimals={decimals}
+        numLocale={numLocale}
       />
     </>
   );
@@ -388,13 +388,6 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                       const isLabel = ci === 0;
                       const v = isLabel ? r.label : (r.cells?.[c.key] ?? '');
                       const isAccountClickable = isLabel && !!r.accountRef && !isHeader && !isTotal;
-                      // AR/AP Aging Summary etc: this ONE cell (not the row) has
-                      // its own contributing invoices/bills — click the amount
-                      // itself to drill in, the same way QuickBooks' own Summary
-                      // report does.
-                      const cellEntries = !isLabel ? r.cellDrill?.[c.key] : null;
-                      const cellKey = `${i}:${c.key}`;
-                      const cellIsOpen = !!expandedCell[cellKey];
                       return (
                         <td
                           key={c.key}
@@ -436,18 +429,6 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                             </button>
                           ) : isLabel ? (
                             v
-                          ) : cellEntries?.length ? (
-                            <button
-                              type="button"
-                              onClick={() => toggleCell(cellKey)}
-                              className={cn(
-                                'text-brand-600 hover:underline tabular-nums',
-                                cellIsOpen && 'underline',
-                              )}
-                              aria-label={cellIsOpen ? 'Collapse' : 'Expand'}
-                            >
-                              {qbAmount(v, emphasize && c.money !== false)}
-                            </button>
                           ) : (
                             qbAmount(v, emphasize && c.money !== false)
                           )}

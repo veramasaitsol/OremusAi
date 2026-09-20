@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Env files (never commit these)
+.env
+.env.local
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+
+# OS junk
+.DS_Store
+**/.DS_Store
+__MACOSX/
+**/__MACOSX/
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Logs
+*.log
+logs/
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Claude Code workspace
+.claude/

@@ -167,6 +167,7 @@ async function buildApAgingDetail(userId, params = {}) {
       dueDate: fmtDateUS(bill.due_date || bill.date),
       amount: num(bill.total),
       balance: bill._balanceAsOf,
+      breakdown: bill._breakdown,
     }, basis);
   }
 
@@ -203,6 +204,10 @@ async function buildApAgingDetail(userId, params = {}) {
     rows.push({ label: bucket.label, isHeader: true, level: 0, cells: {} });
 
     for (const d of items) {
+      // The Balance column is a reconstructed, as-of-date figure — clicking it
+      // opens the same breakdown modal AP Aging Summary's cells use, showing
+      // the GL postings (payments, vendor credits, adjustments) it's built from.
+      const cellDrill = d.breakdown?.length ? { balance: d.breakdown } : undefined;
       rows.push({
         label: fmtDateUS(d.date),
         level: 1,
@@ -217,6 +222,7 @@ async function buildApAgingDetail(userId, params = {}) {
           amount: round2(d.amount),
           balance: round2(d.balance),
         },
+        cellDrill,
       });
     }
 
@@ -476,7 +482,13 @@ async function buildApAgingSummary(userId, params = {}) {
 // live balance unadjusted, exactly the pre-fix behaviour, for that bill only.
 // Sets `_balanceAsOf` on every bill row.
 async function attachAsOfBillBalances(bills, userId, orgId, asOf) {
-  for (const bill of bills) bill._balanceAsOf = num(bill.balance);
+  for (const bill of bills) {
+    bill._balanceAsOf = num(bill.balance);
+    // The AP Aging Detail "Balance" column's click-through breakdown starts
+    // here — replaced below with the actual GL postings for any bill whose
+    // ledger-reconstructed figure is trusted (see the self-validation below).
+    bill._breakdown = [{ name: bill.vendor_name || null, ref: bill.bill_number || null, date: null, type: 'Current balance', amount: bill._balanceAsOf }];
+  }
 
   const cutoff = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} 23:59:59`;
   const [rows] = await pool.execute(
@@ -495,12 +507,40 @@ async function attachAsOfBillBalances(bills, userId, orgId, asOf) {
     const key = `${(r.transaction_number || '').trim()}␟${(r.transaction_details || '').trim()}`;
     byKey.set(key, { asOf: num(r.balance_as_of), today: num(r.balance_today) });
   }
+
+  // Individual (non-aggregated) postings, only fetched to back the "how was
+  // this calculated" breakdown — the trust-check above already decided which
+  // bills' as-of figure is reliable using the aggregate query.
+  const [postings] = await pool.execute(
+    `SELECT transaction_number, transaction_details, transaction_date,
+            transaction_type, source_type, reference_number, credit, debit
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ? AND account_type_code = 'accounts_payable'
+        AND transaction_id NOT LIKE 'xero-recon:%'
+        AND transaction_date <= ?
+      ORDER BY transaction_date`,
+    [userId, orgId, cutoff]
+  );
+  const postingsByKey = new Map();
+  for (const r of postings) {
+    const key = `${(r.transaction_number || '').trim()}␟${(r.transaction_details || '').trim()}`;
+    if (!postingsByKey.has(key)) postingsByKey.set(key, []);
+    postingsByKey.get(key).push(r);
+  }
+
   for (const bill of bills) {
     const key = `${(bill.bill_number || '').trim()}␟${(bill.vendor_name || '').trim()}`;
     const ledger = byKey.get(key);
     if (!ledger) continue; // no ledger postings traced to this bill at all — keep live balance
     if (Math.abs(ledger.today - num(bill.balance)) > 0.5) continue; // doesn't reconcile — untrusted for this bill, keep live balance
     bill._balanceAsOf = ledger.asOf;
+    bill._breakdown = (postingsByKey.get(key) || []).map((r) => ({
+      name: bill.vendor_name || null,
+      ref: r.reference_number || bill.bill_number || null,
+      date: r.transaction_date ? String(r.transaction_date).slice(0, 10) : null,
+      type: r.transaction_type || r.source_type || 'GL Posting',
+      amount: round2(num(r.credit) - num(r.debit)),
+    }));
   }
 }
 

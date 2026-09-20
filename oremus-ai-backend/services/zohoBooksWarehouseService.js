@@ -1293,7 +1293,10 @@ async function syncVendorCredits(userId, accessToken, orgId, runId) {
     try {
       const detail = await fetchOne({
         accessToken, orgId, endpoint: `/vendorcredits/${listRow.vendor_credit_id}`,
-        dataKey: 'vendorcredit', userId, syncRunId: runId,
+        // Confirmed against Zoho's actual response (archived in zb_raw_payloads):
+        // the detail payload wraps the object under "vendor_credit" (with an
+        // underscore) — unlike invoices/bills/creditnotes, which don't use one.
+        dataKey: 'vendor_credit', userId, syncRunId: runId,
       });
       detailCalls += 1;
       if (detail) v = { ...listRow, ...detail };

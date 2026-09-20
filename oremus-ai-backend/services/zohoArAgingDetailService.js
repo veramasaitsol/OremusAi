@@ -224,6 +224,11 @@ async function buildArAgingDetail(userId, params = {}) {
     rows.push({ label: bucket.label, isHeader: true, level: 0, cells: {} });
 
     for (const { inv } of items) {
+      // The Balance column is a reconstructed, as-of-date figure (payments/
+      // credit notes settled after the as-of date are rewound) — clicking it
+      // opens the same breakdown modal AR Aging Summary's cells use, showing
+      // exactly which of those were rewound to get here.
+      const cellDrill = inv._breakdown?.length ? { balance: inv._breakdown } : undefined;
       rows.push({
         label: fmtDate(inv.date),
         level: 1,
@@ -235,6 +240,7 @@ async function buildArAgingDetail(userId, params = {}) {
           amount:   round2(inv.total),
           balance:  round2(inv._balanceAsOf),
         },
+        cellDrill,
       });
     }
 

@@ -26,6 +26,18 @@
 const pool = require('../config/db');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
 
+// Sales-document source_type codes, by platform. Each connected org belongs to
+// exactly one platform, so one combined IN-list works everywhere with no
+// per-platform branching: Zoho stores its own lowercase type ('invoice' /
+// 'creditnote'), QuickBooks stores its own display label ('Invoice' /
+// 'Credit Memo' — see glTypeLabel's note that QuickBooks already stores its
+// printed labels), Xero its document type ('ACCREC' / 'ACCRECCREDIT').
+const SALES_INVOICE_TYPES = ['invoice', 'Invoice', 'ACCREC'];
+const SALES_CREDITNOTE_TYPES = ['creditnote', 'Credit Memo', 'ACCRECCREDIT'];
+const SALES_DOC_TYPES = [...SALES_INVOICE_TYPES, ...SALES_CREDITNOTE_TYPES];
+const inList = (arr) => arr.map(() => '?').join(',');
+const isCreditNoteType = (sourceType) => SALES_CREDITNOTE_TYPES.includes(sourceType);
+
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -116,11 +128,16 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
   const byNum = new Map();
   for (const inv of invoices) {
     inv._balanceAsOf = num(inv.balance);
+    // Every step that moves _balanceAsOf away from the live `balance` is
+    // recorded here too — this is what the AR Aging Detail "Balance" column's
+    // click-through breakdown shows: exactly how the as-of figure was
+    // reconstructed, not just the final number.
+    inv._breakdown = [{ name: inv.customer_name || null, ref: inv.invoice_number || null, date: null, type: 'Current balance', amount: inv._balanceAsOf }];
     if (inv.invoice_number) byNum.set(String(inv.invoice_number).trim(), inv);
   }
 
   const [payments] = await pool.execute(
-    `SELECT amount, unused_amount, invoice_numbers
+    `SELECT amount, unused_amount, invoice_numbers, date, payment_number
        FROM zb_customer_payments
       WHERE user_id = ? AND org_id = ? AND date > ?`,
     [userId, orgId, ymd(asOf)]
@@ -134,14 +151,21 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
       if (!inv) continue;
       const room = Math.max(0, num(inv.total) - inv._balanceAsOf);
       const give = Math.min(room, applied);
-      inv._balanceAsOf += give;
+      if (give > 0) {
+        inv._balanceAsOf += give;
+        inv._breakdown.push({
+          name: inv.customer_name || null, ref: p.payment_number || 'Payment',
+          date: p.date ? String(p.date).slice(0, 10) : null,
+          type: 'Payment reversed (settled after as-of date)', amount: give,
+        });
+      }
       applied -= give;
       if (applied <= 0) break;
     }
   }
 
   const [creditNotes] = await pool.execute(
-    `SELECT total, balance, invoice_number
+    `SELECT total, balance, invoice_number, date, creditnote_number
        FROM zb_credit_notes
       WHERE user_id = ? AND org_id = ? AND date > ?
         AND invoice_number IS NOT NULL AND invoice_number <> ''`,
@@ -153,68 +177,55 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
     const inv = byNum.get(String(cn.invoice_number).trim());
     if (!inv) continue;
     const room = Math.max(0, num(inv.total) - inv._balanceAsOf);
-    inv._balanceAsOf += Math.min(room, applied);
+    const give = Math.min(room, applied);
+    if (give > 0) {
+      inv._balanceAsOf += give;
+      inv._breakdown.push({
+        name: inv.customer_name || null, ref: cn.creditnote_number || 'Credit Note',
+        date: cn.date ? String(cn.date).slice(0, 10) : null,
+        type: 'Credit note reversed (applied after as-of date)', amount: give,
+      });
+    }
   }
 }
 
 // ─── Sales by Customer ──────────────────────────────────────────────────────
 // Built from `account_transactions` (shared ledger) instead of `invoices` so
 // that tax is always included in the total — even for Xero and QuickBooks where
-// the `invoices.tax_total` column is 0.  Income-account credits for ACCREC
-// entries carry the full sale amount inclusive of tax; ACCRECCREDIT lines reduce
-// the total (credit notes / refunds).
+// the `invoices.tax_total` column is 0.
+//
+// The sale's true, tax-inclusive value is every NON-ASSET line the document
+// posts (income, tax-liability, and any contra-revenue/expense-classified
+// line a platform's chart of accounts routes part of a credit note through —
+// confirmed against a live Zoho org's own "Sales by Customer" report) — never
+// just the account_group = 'income' lines alone, which silently drops
+// whichever portion of a document lands on a differently-classified account.
+// This also works out to be the platform-agnostic formula: whatever the
+// asset-side of a balanced document settles to (Accounts Receivable for a
+// still-open invoice, straight to a bank/cash account for one posted as
+// already paid — Xero's posting engine does this for some documents), the
+// non-asset side is always its exact negation, so summing it needs no
+// per-platform branching or asset-account-type guessing.
 async function buildSalesByCustomer(userId, params = {}) {
   const orgId = params.org_id || null;
   requireOrg(orgId);
   const { from, to } = resolveRange(params);
-  const platform = params.platform ? String(params.platform).toLowerCase() : null;
 
-  // Primary: account_transactions (works for all 3 platforms).
-  // Zoho sometimes posts invoice tax as separate liability lines (GST/IGST/CGST),
-  // so when reporting for Zoho include those tax lines in the per-customer total.
-  let txnGrouped;
-  if (platform === 'zoho') {
-    const [rows] = await pool.execute(
-      `SELECT COALESCE(NULLIF(TRIM(at.transaction_details), ''), 'Unknown') AS customer,
-              COUNT(DISTINCT at.source_id) AS cnt,
-              ROUND(SUM(
-                CASE
-                  WHEN at.account_group = 'income' THEN at.credit - at.debit
-                  WHEN LOWER(COALESCE(at.account_name, '')) REGEXP 'gst|cgst|sgst|igst|tax' THEN at.credit - at.debit
-                  ELSE 0
-                END
-              ), 2) AS total,
-              MAX(at.currency_code) AS currency
-         FROM account_transactions at
-        WHERE at.user_id = ? AND at.org_id = ?
-          AND at.source_type IN ('ACCREC', 'ACCRECCREDIT')
-          AND at.transaction_date BETWEEN ? AND ?
-        GROUP BY customer
-        ORDER BY total DESC`,
-      [userId, orgId, from, to]
-    );
-    txnGrouped = rows;
-  } else {
-    const [rows] = await pool.execute(
-      `SELECT COALESCE(NULLIF(TRIM(at.transaction_details), ''), 'Unknown') AS customer,
-              COUNT(DISTINCT at.source_id) AS cnt,
-              ROUND(SUM(
-                CASE WHEN at.account_group = 'income'
-                  THEN at.credit - at.debit
-                  ELSE 0
-                END
-              ), 2) AS total,
-              MAX(at.currency_code) AS currency
-         FROM account_transactions at
-        WHERE at.user_id = ? AND at.org_id = ?
-          AND at.source_type IN ('ACCREC', 'ACCRECCREDIT')
-          AND at.transaction_date BETWEEN ? AND ?
-        GROUP BY customer
-        ORDER BY total DESC`,
-      [userId, orgId, from, to]
-    );
-    txnGrouped = rows;
-  }
+  // Primary: account_transactions (works for all 3 platforms, one query).
+  const [txnGrouped] = await pool.execute(
+    `SELECT COALESCE(NULLIF(TRIM(at.transaction_details), ''), 'Unknown') AS customer,
+            COUNT(DISTINCT CASE WHEN at.source_type IN (${inList(SALES_INVOICE_TYPES)})
+                                 THEN at.source_id END) AS cnt,
+            ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS total,
+            MAX(at.currency_code) AS currency
+       FROM account_transactions at
+      WHERE at.user_id = ? AND at.org_id = ?
+        AND at.source_type IN (${inList(SALES_DOC_TYPES)})
+        AND at.transaction_date BETWEEN ? AND ?
+      GROUP BY customer
+      ORDER BY total DESC`,
+    [...SALES_INVOICE_TYPES, userId, orgId, ...SALES_DOC_TYPES, from, to]
+  );
 
   // Fallback: invoices table (for connections that haven't synced ledger lines
   // yet — e.g. a brand-new Zoho connection before first sync).
@@ -288,26 +299,31 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
 
   const { from, to } = resolveRange(params);
 
-  // Primary: account_transactions (ACCREC / ACCRECCREDIT income lines).
-  // Each invoice has one income-account line per entry; group by source_id to
-  // get per-invoice totals, then nest under customer.
+  // Primary: account_transactions (invoice / credit-note documents — see
+  // SALES_DOC_TYPES for each platform's own source_type spelling). A document's
+  // true, tax-inclusive value is every NON-ASSET line it posts (income,
+  // tax-liability, any contra-revenue-classified line) — never just its
+  // account_group = 'income' line(s) alone, which silently drops whatever
+  // portion lands on a differently-classified account (see buildSalesByCustomer
+  // for the full reasoning) — so group by source_id first to get one correct,
+  // fully-summed row per document, then nest under customer.
   const [txnRows] = await pool.execute(
     `SELECT at.transaction_details AS customer,
             at.source_id,
-            at.reference_number AS invoice_number,
-            DATE_FORMAT(at.transaction_date, '%Y-%m-%d') AS d,
-            at.account_name AS product,
+            MAX(at.reference_number) AS invoice_number,
+            DATE_FORMAT(MAX(at.transaction_date), '%Y-%m-%d') AS d,
+            MAX(at.account_name) AS product,
             at.transaction_details AS description,
-            ROUND(at.credit - at.debit, 2) AS amount,
-            at.currency_code,
-            at.source_type
+            ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS amount,
+            MAX(at.currency_code) AS currency_code,
+            MAX(at.source_type) AS source_type
        FROM account_transactions at
       WHERE at.user_id = ? AND at.org_id = ?
-        AND at.source_type IN ('ACCREC', 'ACCRECCREDIT')
-        AND at.account_group = 'income'
+        AND at.source_type IN (${inList(SALES_DOC_TYPES)})
         AND at.transaction_date BETWEEN ? AND ?
-      ORDER BY at.transaction_details, at.transaction_date, at.reference_number`,
-    [userId, orgId, from, to]
+      GROUP BY at.source_id, at.transaction_details
+      ORDER BY at.transaction_details, d, invoice_number`,
+    [userId, orgId, ...SALES_DOC_TYPES, from, to]
   );
 
   // Fallback: invoices table (pre-sync connections).
@@ -381,7 +397,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
       const absSum = lines.reduce((s, ln) => s + Math.abs(num(ln.item_total)), 0);
       let taxLeft = spread ? invTax : 0;
       lines.forEach((ln, idx) => {
-        const sign = row.source_type === 'ACCRECCREDIT' ? -1 : 1;
+        const sign = isCreditNoteType(row.source_type) ? -1 : 1;
         const base = num(ln.item_total);
         let taxPart = 0;
         if (spread) {
@@ -391,7 +407,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
         }
         entries.push({
           date:    row.d,
-          type:    row.source_type === 'ACCRECCREDIT' ? 'Credit Note' : 'Invoice',
+          type:    isCreditNoteType(row.source_type) ? 'Credit Note' : 'Invoice',
           num:     row.invoice_number || '',
           product: ln.product || '',
           desc:    ln.description || '',
@@ -403,7 +419,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
     } else {
       entries.push({
         date:    row.d,
-        type:    row.source_type === 'ACCRECCREDIT' ? 'Credit Note' : 'Invoice',
+        type:    isCreditNoteType(row.source_type) ? 'Credit Note' : 'Invoice',
         num:     row.invoice_number || '',
         product: row.product || '',
         desc:    row.description || '',
@@ -837,7 +853,6 @@ async function buildArAgingSummary(userId, params = {}) {
       if (entries && entries.length) cellDrill[k.id] = entries;
     }
     cells.total = round2(BUCKETS.reduce((s, k) => s + b[k.id], 0));
-    // Total column drills to every entry across all buckets for this customer.
     const allEntries = BUCKETS.flatMap((k) => byCustomerDrill.get(customer)?.[k.id] || []);
     if (allEntries.length) cellDrill.total = allEntries;
     rows.push({ label: customer, level: 1, cells, cellDrill });

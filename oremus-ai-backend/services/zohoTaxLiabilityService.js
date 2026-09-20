@@ -22,9 +22,11 @@
  * negative amount (drilling into a rate that was only ever paid on purchases,
  * never charged on a sale, shows a negative Total for that row — confirmed
  * against Zoho's own live "SGST2.5 - Transactions" drill, 15 Bills netting to
- * -2,394.67). Reverse-charge bills carry no tax_id/tax_name on the bill itself
- * in Zoho (the tax is self-assessed, declared elsewhere) so they fall out of
- * this query on their own, the same way a credit note nets off an invoice.
+ * -2,394.67). Reverse-charge bills carry no tax_id/tax_name on their own line
+ * items (the tax is self-assessed straight to the Output CGST/SGST/IGST
+ * accounts, not charged on the bill's line) — Zoho's OWN Tax Summary still
+ * lists them, labelled "Bills" (plural) in its drill-down, so they're
+ * reconstructed separately off the GL further down instead of being dropped.
  *
  * Tax is charged and rounded once per document per levy, then summed — never
  * re-derived from the period's total. That is what makes these figures tie to
@@ -211,7 +213,7 @@ const GST_SLAB_RATE = { CGST: 9, SGST: 9, IGST: 18 };
 // Provider labels for a purchase document — the origin of an input-tax-credit
 // posting, as opposed to a GST payment or a set-off journal that also moves
 // the Input control accounts.
-const BILL_TXN_TYPES = "('Bill','ACCPAY','bill','ACCPAYCREDIT','Vendor Credit','Bill Credit','vendor_credit','Debit Note')";
+const BILL_TXN_TYPES = "('Bill','Bills','bills','ACCPAY','bill','ACCPAYCREDIT','Vendor Credit','Bill Credit','vendor_credit','Debit Note')";
 
 /**
  * QuickBooks (India) — GST is modelled as ordinary invoice line items named
@@ -611,6 +613,56 @@ async function buildTaxLiability(userId, params = {}) {
     }
   }
 
+  // Reverse-charge (self-assessed) bills carry no tax_id/tax_name on their own
+  // line items — Zoho doesn't tax the bill's line, it self-assesses the GST
+  // separately, posting it straight to the Output CGST/SGST/IGST liability
+  // accounts (offset by a "Reverse Charge Tax Input but not due" asset). So
+  // these never show up in `billDocs` above at all — but Zoho's own Tax
+  // Summary DOES list them (as "Bills", plural, in its own drill-down),
+  // confirmed against a real RCM bill: ₹1,00,000 taxable, ₹9,000 to each of
+  // Output CGST/Output SGST — reconstructed here the same way, off the GL
+  // instead of a taxed line item. Rate can't be read off the posting (the
+  // account carries no rate), so it's presented on the standard 18% GST slab
+  // like the QuickBooks/Xero ITC rows above, disclosed via meta.taxRateAssumed.
+  const [rcmBillRows] = await pool.execute(
+    `SELECT source_id AS doc_id, account_name,
+            transaction_number AS doc_number, transaction_date AS doc_date,
+            SUM(credit) - SUM(debit) AS amount
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ?
+        AND transaction_type = 'bill'
+        AND (account_name LIKE 'Output CGST%' OR account_name LIKE 'Output SGST%' OR account_name LIKE 'Output IGST%')
+        AND transaction_date BETWEEN ? AND ?
+        AND transaction_id NOT LIKE 'xero-recon:%'
+      GROUP BY source_id, account_name, transaction_number, transaction_date`,
+    [userId, orgId, from, to]
+  );
+  let anyRcmBill = false;
+  for (const r of rcmBillRows) {
+    const levyName = gstLevyName(r.account_name);
+    const amount = round2(num(r.amount));
+    if (!levyName || amount === 0) continue;
+    anyRcmBill = true;
+    const pct = GST_SLAB_RATE[levyName];
+    const name = `${levyName}${rateSuffix(pct)}`;
+    const key = `${name}|${pct}`;
+    let levy = levies.get(key);
+    if (!levy) {
+      levy = { taxId: '', name, pct, taxable: 0, tax: 0, breakdown: [] };
+      levies.set(key, levy);
+    }
+    const taxable = round2(amount / (pct / 100));
+    levy.taxable = round2(levy.taxable + taxable);
+    levy.tax = round2(levy.tax + amount);
+    levy.breakdown.push({
+      date: r.doc_date ? String(r.doc_date).slice(0, 10) : null,
+      ref: r.doc_number || r.doc_id,
+      type: 'Bills',
+      txnAmount: taxable,
+      amount,
+    });
+  }
+
   // Query for "Others" — manual transactions in Tax Payable accounts
   const [otherRows] = await pool.execute(
     `SELECT transaction_date, reference_number, transaction_number, 
@@ -660,7 +712,12 @@ async function buildTaxLiability(userId, params = {}) {
       amount: net,
     });
   }
-  return renderLevies(levies, { currency, from, to, source: 'warehouse', statuses, othersAmount, othersBreakdown});
+  const out = renderLevies(levies, { currency, from, to, source: 'warehouse', statuses, othersAmount, othersBreakdown});
+  if (anyRcmBill) {
+    out.meta.taxRateAssumed = (out.meta.taxRateAssumed ? `${out.meta.taxRateAssumed}; ` : '')
+      + 'reverse-charge bill rows on 18% slab (CGST/SGST 9%, IGST 18%)';
+  }
+  return out;
 }
 
 module.exports = { buildTaxLiability };
