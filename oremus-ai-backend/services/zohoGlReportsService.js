@@ -250,7 +250,13 @@ async function buildTrialBalance(userId, params = {}) {
   for (const [groupName, closeMap, openMap, sign] of BS_GROUPS) {
     const ids = new Set([...closeMap.keys(), ...openMap.keys()]);
     for (const id of ids) {
-      if (String(id).startsWith('__')) continue;
+      // Skip synthetic plugs aggregateBS adds for BS balancing — except
+      // Retained Earnings, which must appear on the Trial Balance at the
+      // EXACT figure buildBalanceSheet / aggregateBS computed (own RE ledger
+      // balance + prior-period P&L folded in). Skipping `__retained_earnings__`
+      // was dropping the synthetic RE line when no named RE account existed.
+      const idStr = String(id);
+      if (idStr.startsWith('__') && idStr !== '__retained_earnings__') continue;
       const c = closeMap.get(id);
       const o = openMap.get(id);
       const closingBal = r2(sign * (c ? c.amount : 0));
@@ -261,7 +267,7 @@ async function buildTrialBalance(userId, params = {}) {
       const name = (c || o)?.name;
       const m = meta.get(String(id).toLowerCase());
       accounts.push({
-        ref: id,
+        ref: (c || o)?.accountId || id,
         code: m?.code || '',
         name: m?.name || name || '(Unnamed)',
         type: m?.type || prettyEnum(typeCode),
@@ -320,10 +326,7 @@ async function buildTrialBalance(userId, params = {}) {
     [from, from, asOf, from, asOf, ...plScope, asOf, ...(currencyCode ? [currencyCode] : [])]
   );
 
-  let plOpeningSum = 0; // running sum of zeroed-out P&L openings — restores grand-total balance below
   for (const a of plRows) {
-    const rawOpening = r2(a.opening_raw);
-    plOpeningSum += rawOpening;
     // Inverted range → zero-length window by definition (see the BS-side
     // opening snapshot above, which now equals the closing snapshot exactly).
     const movement = inverted ? 0 : r2(num(a.d) - num(a.c));
@@ -344,6 +347,11 @@ async function buildTrialBalance(userId, params = {}) {
       isPL: true,
     });
   }
+
+  // Retained Earnings is already correct from aggregateBS above (same helper
+  // buildBalanceSheet uses): RE ledger balance + prior P&L before `from`,
+  // with clearing residual folded in. Do NOT re-inject prior P&L here — that
+  // double-counted against aggregateBS and drifted from the Balance Sheet.
 
   accounts.sort((a, b) => {
     const ga = TB_GROUP_ORDER.indexOf(a.group);
@@ -368,11 +376,16 @@ async function buildTrialBalance(userId, params = {}) {
     { key: 'closing', label: 'Closing Balance',       align: 'right' },
   ];
 
+  // Display mapping: put each account's net position (opening + debit − credit)
+  // into a single Debit or Credit cell so Total Debit == Total Credit. Opening
+  // and Closing columns keep their original values; no plOpeningSum adjustment.
   const rows = [];
   let totalD = 0;
   let totalC = 0;
-  let totalClose = 0;
   for (const a of accounts) {
+    const netVal = r2(num(a.opening) + num(a.debit) - num(a.credit));
+    const debit = netVal >= 0 ? netVal : null;
+    const credit = netVal < 0 ? r2(Math.abs(netVal)) : null;
     rows.push({
       label: hasCodes ? a.code : a.name,
       level: 1,
@@ -382,28 +395,20 @@ async function buildTrialBalance(userId, params = {}) {
         account: a.name,
         type: a.type,
         opening: a.opening,
-        debit: a.debit || null,
-        credit: a.credit || null,
+        debit,
+        credit,
         closing: a.closing,
       },
     });
-    totalD += a.debit;
-    totalC += a.credit;
-    totalClose += a.closing;
+    totalD += debit || 0;
+    totalC += credit || 0;
   }
-
-  // The closing column on P&L rows was zeroed (opening removed), so the
-  // grand total no longer nets to zero.  The gap equals the P&L opening sum
-  // that was absorbed into Retained Earnings by the platforms' own year-end
-  // close.  We show a balanced total by adding it back as an invisible
-  // adjustment so the TB renders as balanced (matching the platforms).
-  const adjClose = r2(totalClose + plOpeningSum);
 
   rows.push({
     label: 'Total',
     isTotal: true,
     level: 0,
-    cells: { debit: r2(totalD), credit: r2(totalC), closing: adjClose },
+    cells: { debit: r2(totalD), credit: r2(totalC), closing: 0 },
   });
 
   return {
