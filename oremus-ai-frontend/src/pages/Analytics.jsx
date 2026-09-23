@@ -297,7 +297,6 @@ function AiCard({ data, currency, hasRows, feedback, onRate, htmlContainerRef })
       {data?.rawHtml ? (
         // Render only the API's HTML response — nothing extra
         <div
-          ref={htmlContainerRef}
           className="text-[14px] leading-relaxed text-navy-800 dark:text-navy-100"
           dangerouslySetInnerHTML={{ __html: data.rawHtml }}
         />

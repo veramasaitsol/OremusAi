@@ -26,18 +26,6 @@
 const pool = require('../config/db');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
 
-// Sales-document source_type codes, by platform. Each connected org belongs to
-// exactly one platform, so one combined IN-list works everywhere with no
-// per-platform branching: Zoho stores its own lowercase type ('invoice' /
-// 'creditnote'), QuickBooks stores its own display label ('Invoice' /
-// 'Credit Memo' — see glTypeLabel's note that QuickBooks already stores its
-// printed labels), Xero its document type ('ACCREC' / 'ACCRECCREDIT').
-const SALES_INVOICE_TYPES = ['invoice', 'Invoice', 'ACCREC'];
-const SALES_CREDITNOTE_TYPES = ['creditnote', 'Credit Memo', 'ACCRECCREDIT'];
-const SALES_DOC_TYPES = [...SALES_INVOICE_TYPES, ...SALES_CREDITNOTE_TYPES];
-const inList = (arr) => arr.map(() => '?').join(',');
-const isCreditNoteType = (sourceType) => SALES_CREDITNOTE_TYPES.includes(sourceType);
-
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -853,6 +841,7 @@ async function buildArAgingSummary(userId, params = {}) {
       if (entries && entries.length) cellDrill[k.id] = entries;
     }
     cells.total = round2(BUCKETS.reduce((s, k) => s + b[k.id], 0));
+    // Total column drills to every entry across all buckets for this customer.
     const allEntries = BUCKETS.flatMap((k) => byCustomerDrill.get(customer)?.[k.id] || []);
     if (allEntries.length) cellDrill.total = allEntries;
     rows.push({ label: customer, level: 1, cells, cellDrill });
