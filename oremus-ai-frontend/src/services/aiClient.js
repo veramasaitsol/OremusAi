@@ -162,28 +162,38 @@ export function formatAIPlatform(platform) {
   return AI_PLATFORM_LABELS[key] || 'Zoho';
 }
 
-function getCurrentClientIdFromStorage() {
+function getStoredSession() {
   try {
     const raw = localStorage.getItem('oremus_current_v1');
-    if (!raw) return null;
-
-    const session = JSON.parse(raw);
-    if (session?.clientId) return String(session.clientId);
-
-    const token = session?.token;
-    if (!token || typeof token !== 'string') return null;
-
-    const payloadPart = token.split('.')[1];
-    if (!payloadPart) return null;
-
-    const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
-    const decoded = JSON.parse(atob(padded));
-    const clientId = decoded?.clientId ?? decoded?.client_id ?? decoded?.clientid;
-    return clientId ? String(clientId) : null;
+    return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
+}
+
+// Decode the session's JWT payload (the `id`/`client_id`/etc. claims) — the
+// stored session only carries the raw token, not these fields directly.
+function decodeStoredToken() {
+  const token = getStoredSession()?.token;
+  if (!token || typeof token !== 'string') return null;
+  try {
+    const payloadPart = token.split('.')[1];
+    if (!payloadPart) return null;
+    const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+// The JWT's own `id` claim — NOT the stored session object's top-level `id`
+// (that's a separate, prefixed client-facing identifier, e.g. "u-25", not
+// this numeric database id) — so this always decodes the token itself.
+function getCurrentUserIdFromStorage() {
+  const decoded = decodeStoredToken();
+  const userId = decoded?.id ?? decoded?.userId ?? decoded?.user_id;
+  return userId != null ? String(userId) : null;
 }
 
 // Oremus AI query service. Lives on its own origin (separate from the /api
@@ -290,21 +300,16 @@ export function normalizeAIResponse(raw) {
   return out;
 }
 
-// POST /query { platform, org_id, question } → normalized AI answer.
+// POST /query { question, userId } → normalized AI answer.
 // The service's `success` flag gates the result: only a successful response is
 // returned as an answer; a failed one throws (with the service's reason) so the
 // chat surfaces show their error bubble instead of an answer card.
-export async function askAI({ platform, question, org_id, orgId }) {
-  const resolvedClientId = getCurrentClientIdFromStorage();
+export async function askAI({ question }) {
+  const resolvedUserId = getCurrentUserIdFromStorage();
   const payload = {
     question,
-    ...(resolvedClientId ? { clientId: String(resolvedClientId) } : {}),
+    ...(resolvedUserId ? { userId: resolvedUserId } : {}),
   };
-
-  const resolvedOrgId = org_id ?? orgId;
-  if (resolvedOrgId != null && resolvedOrgId !== '') {
-    payload.org_id = String(resolvedOrgId);
-  }
 
   const { data } = await axios.post(
     `${AI_BASE}/query`,
