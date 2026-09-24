@@ -706,11 +706,11 @@ async function buildArAgingSummary(userId, params = {}) {
   const orgId = params.org_id || null;
   requireOrg(orgId);
 
-  // Point-in-time as-of date — the selected "To" date (defaults to today).
-  const asOf = resolveAsOf(params);
-  // Optional "From" — narrows which invoices are considered by issue date;
-  // aging itself still runs as of `asOf` above. `null` (no filter) by default.
-  const fromDate = resolveFrom(params);
+  // Determine as-of date from params (point-in-time snapshot date)
+  const today = new Date().toISOString().slice(0, 10);
+  const asOfRaw = params.to_date || params.as_of_date || params.to || params.asOf || today;
+  const asOfDate = asOfRaw ? new Date(asOfRaw) : new Date();
+  const asOf = Number.isNaN(asOfDate.getTime()) ? new Date() : asOfDate;
 
   // Age by due date (what Xero's Aged Receivables and QuickBooks' A/R Aging
   // Summary do by default); `aging_by=invoice_date` switches to the invoice date
@@ -719,17 +719,20 @@ async function buildArAgingSummary(userId, params = {}) {
   const agingByInvoiceDate =
     String(params.aging_by || params.aging_by_date || '').toLowerCase().replace(/[\s_-]/g, '') === 'invoicedate';
 
-  // Pull every issued invoice (NOT just currently-open ones): an invoice with a
-  // zero balance today may have been open on the as-of date. attachAsOfBalances
-  // rewinds post-as-of payments to recover the historical balance.
+  // Pull every invoice issued on or before the as-of date. An AR Aging report is
+  // an "as of" point-in-time snapshot, not a date-range statement. Any invoice
+  // issued on or before the snapshot date must be included so attachAsOfBalances
+  // can rewind settlements made after the snapshot date and calculate the
+  // historical open balance.
   // Statuses excluded are the non-receivable ones across all three providers:
   // Zoho draft/void, Xero DRAFT/SUBMITTED/VOIDED/DELETED, QuickBooks drafts.
   const [invoices] = await pool.execute(
     `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
+        AND date <= ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'approved', 'submitted', 'void', 'voided', 'deleted')`,
-    [userId, orgId]
+    [userId, orgId, ymd(asOf)]
   );
 
   await attachAsOfBalances(invoices, userId, orgId, asOf);
@@ -768,11 +771,6 @@ async function buildArAgingSummary(userId, params = {}) {
   let grandTotal = 0;
 
   for (const inv of invoices) {
-    // Point-in-time: ignore invoices issued after the as-of date — they didn't
-    // exist yet, so they must not appear in (or skew) a historical aging.
-    if (inv.date && new Date(inv.date) > asOf) continue;
-    // Optional From: exclude invoices issued before the selected start date.
-    if (fromDate && inv.date && new Date(inv.date) < fromDate) continue;
     const bal = inv._balanceAsOf;
     if (bal <= 0) continue; // settled on/before the as-of date — not outstanding
     // An invoice with no due date is due on issue (that's how the providers
@@ -859,7 +857,6 @@ async function buildArAgingSummary(userId, params = {}) {
     meta: {
       title: 'A/R Aging Summary Report',
       asOf: fmtDate(asOf),
-      from: fromDate ? fmtDate(fromDate) : null,
       agingBy: agingByInvoiceDate ? 'Invoice Date' : 'Invoice Due Date',
     },
   };
