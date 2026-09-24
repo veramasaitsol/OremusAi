@@ -162,6 +162,30 @@ export function formatAIPlatform(platform) {
   return AI_PLATFORM_LABELS[key] || 'Zoho';
 }
 
+function getCurrentClientIdFromStorage() {
+  try {
+    const raw = localStorage.getItem('oremus_current_v1');
+    if (!raw) return null;
+
+    const session = JSON.parse(raw);
+    if (session?.clientId) return String(session.clientId);
+
+    const token = session?.token;
+    if (!token || typeof token !== 'string') return null;
+
+    const payloadPart = token.split('.')[1];
+    if (!payloadPart) return null;
+
+    const normalized = payloadPart.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = JSON.parse(atob(padded));
+    const clientId = decoded?.clientId ?? decoded?.client_id ?? decoded?.clientid;
+    return clientId ? String(clientId) : null;
+  } catch {
+    return null;
+  }
+}
+
 // Oremus AI query service. Lives on its own origin (separate from the /api
 // backend), so it uses a dedicated axios call rather than the shared client.
 // Override the base via VITE_AI_API_URL in the .env file if the host changes.
@@ -266,15 +290,25 @@ export function normalizeAIResponse(raw) {
   return out;
 }
 
-// POST /query { platform, question } → normalized AI answer.
+// POST /query { platform, org_id, question } → normalized AI answer.
 // The service's `success` flag gates the result: only a successful response is
 // returned as an answer; a failed one throws (with the service's reason) so the
 // chat surfaces show their error bubble instead of an answer card.
-export async function askAI({ platform, question }) {
-  const payloadPlatform = formatAIPlatform(platform);
+export async function askAI({ platform, question, org_id, orgId }) {
+  const resolvedClientId = getCurrentClientIdFromStorage();
+  const payload = {
+    question,
+    ...(resolvedClientId ? { clientId: String(resolvedClientId) } : {}),
+  };
+
+  const resolvedOrgId = org_id ?? orgId;
+  if (resolvedOrgId != null && resolvedOrgId !== '') {
+    payload.org_id = String(resolvedOrgId);
+  }
+
   const { data } = await axios.post(
     `${AI_BASE}/query`,
-    { platform: payloadPlatform, question },
+    payload,
     { headers: { 'Content-Type': 'application/json' }, timeout: 120000 },
   );
   const normalized = normalizeAIResponse(data);

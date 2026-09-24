@@ -14,6 +14,7 @@ import {
 import Popover from '../ui/Popover.jsx';
 import ExportMenu from './ExportMenu.jsx';
 import ReportSkeleton from './ReportSkeleton.jsx';
+import BreakdownModal from './BreakdownModal.jsx';
 import {
   selectOpenReport, selectReportData, selectReportStatus,
   selectFilters,
@@ -66,6 +67,9 @@ export default function GstReturnsWorkbookViewer() {
   const currency = data?.currency || 'INR';
 
   const [view, setView] = useState('table');
+  // { title, subtitle, entries } — which contributing documents fed into the
+  // cell the user just clicked, or null when the modal is closed.
+  const [breakdown, setBreakdown] = useState(null);
 
   const range = useMemo(
     () => resolvePresetRange(filters.dateRange, { from: filters.customFrom, to: filters.customTo }),
@@ -228,18 +232,27 @@ export default function GstReturnsWorkbookViewer() {
             ) : (
               <div className="space-y-8">
                 {sections.map((s, si) => (
-                  <Section key={si} section={s} currency={currency} />
+                  <Section key={si} section={s} currency={currency} onCellClick={setBreakdown} />
                 ))}
               </div>
             )}
           </div>
         </div>
       </div>
+
+      <BreakdownModal
+        open={!!breakdown}
+        onClose={() => setBreakdown(null)}
+        title={breakdown?.title}
+        subtitle={breakdown?.subtitle}
+        entries={breakdown?.entries || []}
+        currency={currency}
+      />
     </>
   );
 }
 
-function Section({ section, currency }) {
+function Section({ section, currency, onCellClick }) {
   const { no, title, columns, rows, tint = 'blue' } = section;
   const tintCls = TINTS[tint] || TINTS.blue;
   const ncols = columns.length;
@@ -288,20 +301,37 @@ function Section({ section, currency }) {
                 </tr>
               );
             }
+            const rowLabel = r.cells[0] || title;
             return (
               <tr key={ri} className={cn('border-b border-navy-100 dark:border-navy-800', r.bold && 'font-bold')}>
-                {r.cells.map((val, ci) => (
-                  <td
-                    key={ci}
-                    className={cn(
-                      'py-2 px-3',
-                      ci === 0 ? 'text-left' : 'text-right tabular-nums',
-                      r.bold ? 'text-navy-900 dark:text-white' : 'text-navy-800 dark:text-navy-100',
-                    )}
-                  >
-                    {ci === 0 ? val : formatCell(val, currency)}
-                  </td>
-                ))}
+                {r.cells.map((val, ci) => {
+                  const entries = r.cellBreakdown?.[ci];
+                  const clickable = ci !== 0 && entries?.length;
+                  return (
+                    <td
+                      key={ci}
+                      className={cn(
+                        'py-2 px-3',
+                        ci === 0 ? 'text-left' : 'text-right tabular-nums',
+                        r.bold ? 'text-navy-900 dark:text-white' : 'text-navy-800 dark:text-navy-100',
+                      )}
+                    >
+                      {ci === 0 ? val : clickable ? (
+                        <button
+                          type="button"
+                          onClick={() => onCellClick({
+                            title: `${rowLabel} — ${columns[ci]}`,
+                            subtitle: `${no} ${title}`,
+                            entries,
+                          })}
+                          className="text-brand-600 hover:underline tabular-nums"
+                        >
+                          {formatCell(val, currency)}
+                        </button>
+                      ) : formatCell(val, currency)}
+                    </td>
+                  );
+                })}
               </tr>
             );
           })}

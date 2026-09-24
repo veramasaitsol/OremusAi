@@ -8,6 +8,7 @@ import { cn } from '../../utils/classNames.js';
 import AccountLedgerModal from './AccountLedgerModal.jsx';
 import SourceDocumentModal from './SourceDocumentModal.jsx';
 import BreakdownModal from './BreakdownModal.jsx';
+import { exportRowsCSV } from '../../utils/exportReport.js';
 
 // `numberFormat` maps the "Number format" filter (indian/international) to
 // the locale `fmt` should group digits with, overriding the currency default
@@ -99,6 +100,7 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
   const [ledger, setLedger] = useState(null);  // { accountRef, accountName }
   const [source, setSource] = useState(null);  // { sourceType, sourceRef }
   const [drillPage, setDrillPage] = useState({});  // pagination for inline drill-down
+  const [breakdownModal, setBreakdownModal] = useState(null);  // { title, subtitle, entries }
 
   // Resolve the report's active date range so the account ledger drill scopes
   // to the same period the report was run for.
@@ -220,78 +222,11 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
   );
 
   // One cell's drill-down — the invoices/bills/credits that sum into a single
-  // (customer, bucket) or (vendor, bucket) amount, e.g. AR/AP Aging Summary.
-  // Same Counterparty/Ref/Date/Amount shape as the row-level `r.drill` above,
-  // so it reads consistently, just scoped to one cell instead of the whole row.
-  const renderCellDrill = (entries, cellKey, colSpan, exportName) => {
-    const totalPages = Math.max(1, Math.ceil(entries.length / CELL_DRILL_PAGE_SIZE));
-    const pg = Math.min(cellPage[cellKey] || 0, totalPages - 1);
-    const start = pg * CELL_DRILL_PAGE_SIZE;
-    const slice = entries.slice(start, start + CELL_DRILL_PAGE_SIZE);
-    return (
-      <tr key={`cell-${cellKey}`}>
-        <td colSpan={colSpan} className="px-3 pb-3 pt-1">
-          <div className="ml-6 mt-1 mb-2 rounded-lg border border-navy-100 dark:border-navy-800 bg-navy-50/40 dark:bg-navy-900/40">
-            <div className="px-3 py-1.5 border-b border-navy-100 dark:border-navy-800 flex items-center justify-end">
-              <ExportBtn onClick={() => exportRowsCSV(
-                ['Counterparty', 'Ref', 'Date', 'Amount'],
-                entries.map((d) => [d.name || '', d.ref || '', d.date || '', d.amount ?? '']),
-                exportName || 'Breakdown',
-              )} />
-            </div>
-            <table className="w-full text-[11.5px]">
-              <thead>
-                <tr className="text-[10px] uppercase tracking-wider text-navy-400">
-                  <th className="text-left px-3 py-1.5">Counterparty</th>
-                  <th className="text-left px-3 py-1.5">Ref</th>
-                  <th className="text-left px-3 py-1.5">Date</th>
-                  <th className="text-right px-3 py-1.5">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {slice.map((d, di) => (
-                  <tr key={di} className="border-t border-navy-100 dark:border-navy-800">
-                    <td className="px-3 py-1.5 text-navy-700 dark:text-navy-200">{d.name}</td>
-                    <td className="px-3 py-1.5 font-mono text-navy-500">{d.ref}</td>
-                    <td className="px-3 py-1.5 text-navy-500">{d.date}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-navy-700 dark:text-navy-200">
-                      {formatCell(d.amount, decimals, currency, numLocale, parensNeg)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {entries.length > CELL_DRILL_PAGE_SIZE && (
-              <div className="px-3 py-1.5 border-t border-navy-100 dark:border-navy-800 flex flex-wrap items-center justify-between gap-2 bg-navy-50/60 dark:bg-navy-900/60">
-                <span className="text-[11px] text-navy-500 dark:text-navy-400">
-                  Showing {start + 1}–{Math.min(start + CELL_DRILL_PAGE_SIZE, entries.length)} of {entries.length} entries
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={pg === 0}
-                    onClick={() => setCellPage((p) => ({ ...p, [cellKey]: pg - 1 }))}
-                    className="h-6 px-2 rounded-md border border-navy-200 dark:border-navy-700 text-[11px] font-semibold text-navy-600 dark:text-navy-300 hover:bg-white dark:hover:bg-navy-800 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    ← Prev
-                  </button>
-                  <span className="text-[11px] text-navy-500 dark:text-navy-400 tabular-nums">Page {pg + 1} of {totalPages}</span>
-                  <button
-                    type="button"
-                    disabled={pg >= totalPages - 1}
-                    onClick={() => setCellPage((p) => ({ ...p, [cellKey]: pg + 1 }))}
-                    className="h-6 px-2 rounded-md border border-navy-200 dark:border-navy-700 text-[11px] font-semibold text-navy-600 dark:text-navy-300 hover:bg-white dark:hover:bg-navy-800 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    Next →
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        </td>
-      </tr>
-    );
-  };
+  // (customer, bucket) or (vendor, bucket) amount, e.g. AR/AP Aging Summary —
+  // opens in the same BreakdownModal every other "how was this calculated"
+  // popup uses (GST Returns Workbook, row-level breakdowns below), rather
+  // than an inline expansion, so there's one drill-down UI instead of two.
+  const openCellDrill = (entries, title) => setBreakdownModal({ title, entries });
 
   // ── QuickBooks Online–style sheet ────────────────────────────────────────
   // Clean white sheet, section headers with a collapse chevron, leaf amounts
@@ -419,30 +354,37 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                               {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                             </button>
                           )}
-                          {isAccountClickable ? (
-                            <button
-                              type="button"
-                              onClick={() => setLedger({ accountRef: String(r.accountRef), accountName: r.accountName || r.label })}
-                              className="text-left text-brand-600 hover:underline"
-                            >
-                              {v}
-                            </button>
-                          ) : isLabel ? (
-                            v
-                          ) : (
-                            qbAmount(v, emphasize && c.money !== false)
-                          )}
+                          {(() => {
+                            const cellEntries = !isLabel ? r.cellDrill?.[c.key] : null;
+                            if (isAccountClickable) {
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => setLedger({ accountRef: String(r.accountRef), accountName: r.accountName || r.label })}
+                                  className="text-left text-brand-600 hover:underline"
+                                >
+                                  {v}
+                                </button>
+                              );
+                            }
+                            if (isLabel) return v;
+                            if (cellEntries?.length) {
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => openCellDrill(cellEntries, `${r.label} — ${c.label}`)}
+                                  className="text-brand-600 hover:underline tabular-nums"
+                                >
+                                  {qbAmount(v, emphasize && c.money !== false)}
+                                </button>
+                              );
+                            }
+                            return qbAmount(v, emphasize && c.money !== false);
+                          })()}
                         </td>
                       );
                     })}
                   </tr>
-                  {cols.map((c, ci) => {
-                    if (ci === 0) return null;
-                    const cellKey = `${i}:${c.key}`;
-                    const entries = r.cellDrill?.[c.key];
-                    if (!entries?.length || !expandedCell[cellKey]) return null;
-                    return renderCellDrill(entries, cellKey, cols.length, `${r.label} - ${c.label}`);
-                  })}
                   {hasBreakdown && !r.drill && isExpanded && (
                     <tr>
                       <td colSpan={cols.length} className="px-3 pb-3 pt-1">

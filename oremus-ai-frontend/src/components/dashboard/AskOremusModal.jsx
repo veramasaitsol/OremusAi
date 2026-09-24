@@ -4,6 +4,7 @@ import * as Icons from 'lucide-react';
 import { X, Sparkles, Send, Loader2 } from 'lucide-react';
 import Badge from '../ui/Badge.jsx';
 import { selectUser } from '../../features/auth/authSlice.js';
+import { selectOrgSelectedId } from '../../features/orgs/orgsSlice.js';
 import { askAI, formatAIPlatform } from '../../services/aiClient.js';
 
 const ICON_BG = {
@@ -81,6 +82,7 @@ function AiAnswer({ data }) {
 
 export default function AskOremusModal({ insights = [], onClose }) {
   const user = useSelector(selectUser);
+  const selectedOrgId = useSelector(selectOrgSelectedId);
   // The AI query needs a provider; fall back to Zoho when the user has none.
   const platform = formatAIPlatform(user?.integrationType && user.integrationType !== 'none'
     ? user.integrationType
@@ -108,7 +110,7 @@ export default function AskOremusModal({ insights = [], onClose }) {
     setMessages((m) => [...m, { role: 'user', text: q }]);
     setLoading(true);
     try {
-      const data = await askAI({ platform, question: q });
+      const data = await askAI({ platform, question: q, org_id: selectedOrgId });
       setMessages((m) => [...m, { role: 'ai', data }]);
     } catch (err) {
       const msg = err?.response?.data?.message || err?.message || 'Request failed.';

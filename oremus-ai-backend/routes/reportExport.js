@@ -35,8 +35,10 @@ router.post('/', async (req, res) => {
     const format = String(req.query.format || 'xlsx').toLowerCase();
     const { data, reportName = 'Report', meta = {} } = req.body || {};
 
-    if (!data || !Array.isArray(data.columns) || !Array.isArray(data.rows)) {
-      return res.status(400).json({ error: 'Invalid report data (expected { columns, rows }).' });
+    const isTable = data && Array.isArray(data.columns) && Array.isArray(data.rows);
+    const isWorkbook = data && (data.workbook || Array.isArray(data.sections));
+    if (!isTable && !isWorkbook) {
+      return res.status(400).json({ error: 'Invalid report data (expected { columns, rows } or a { sections } workbook).' });
     }
 
     const fileBase = buildFileName(reportName);

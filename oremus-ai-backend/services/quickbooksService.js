@@ -764,7 +764,14 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
           userId, String(realmId), 'quickbooks', txnId, ref, date,
           acct.name || r.cells?.account || null,
           acct.group || null, acct.code || null,
-          r.cells?.memo || r.cells?.name || null,
+          // QBO's GL report's own "Name" column is the customer/vendor that
+          // line belongs to; "Memo" is just the line-item description. Zoho
+          // and Xero both populate `transaction_details` with the contact
+          // name (zohoService.js / xeroPostingEngine.js), so every report
+          // that reads it as "who this transaction was with" — Sales by
+          // Customer chief among them — expects the same here. Fall back to
+          // memo only when a row genuinely has no name (e.g. a Journal Entry).
+          r.cells?.name || r.cells?.memo || null,
           glType || 'GeneralLedger',
           String(idx),
           r.cells?.docnum || null,

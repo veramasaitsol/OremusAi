@@ -775,6 +775,7 @@ import {
   Copy, Check, FileSpreadsheet, Lock, X, ThumbsUp, ThumbsDown, Timer,
 } from 'lucide-react';
 import { selectUser } from '../features/auth/authSlice.js';
+import { selectOrgSelectedId } from '../features/orgs/orgsSlice.js';
 import { selectActiveCurrency } from '../features/ui/uiSlice.js';
 import { askAI, formatAIPlatform } from '../services/aiClient.js';
 import { submitFeedback } from '../services/feedbackClient.js';
@@ -1101,6 +1102,7 @@ export default function Analytics() {
   const user = useSelector(selectUser);
   const currency = useSelector(selectActiveCurrency);
   const activeClient = useSelector(selectActiveClient);
+  const selectedOrgId = useSelector(selectOrgSelectedId);
   // The AI query needs a provider; fall back to Zoho when the user has none.
   const platform = formatAIPlatform(user?.integrationType && user.integrationType !== 'none'
     ? user.integrationType
@@ -1150,7 +1152,7 @@ export default function Analytics() {
     upsert(id, (c) => ({ ...c, messages: [...c.messages, { role: 'user', text: q }] }));
     setLoading(true);
     try {
-      const data = await askAI({ platform, question: q });
+      const data = await askAI({ platform, question: q, org_id: selectedOrgId });
       const msgId = `m_${Date.now()}`;
       upsert(id, (c) => ({ ...c, messages: [...c.messages, { role: 'ai', data, id: msgId }] }));
       // Feedback popup after every answer — let the card settle, then pop in.

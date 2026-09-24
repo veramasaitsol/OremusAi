@@ -24,7 +24,65 @@
  */
 
 const pool = require('../config/db');
-const { getBaseCurrency } = require('./zohoChartOfAccountsService');
+
+// Sales-document source_type codes, by platform. Each connected org belongs to
+// exactly one platform, so one combined IN-list works everywhere with no
+// per-platform branching: Zoho stores its own lowercase type ('invoice' /
+// 'creditnote'), QuickBooks stores its own display label ('Invoice' /
+// 'Credit Memo' — see glTypeLabel's note that QuickBooks already stores its
+// printed labels), Xero its document type ('ACCREC' / 'ACCRECCREDIT').
+const SALES_INVOICE_TYPES = ['invoice', 'Invoice', 'ACCREC'];
+const SALES_CREDITNOTE_TYPES = ['creditnote', 'Credit Memo', 'ACCRECCREDIT'];
+const SALES_DOC_TYPES = [...SALES_INVOICE_TYPES, ...SALES_CREDITNOTE_TYPES];
+const inList = (arr) => arr.map(() => '?').join(',');
+const isCreditNoteType = (sourceType) => SALES_CREDITNOTE_TYPES.includes(sourceType);
+
+// Customer-payment source_type codes, by platform — used only to find realized
+// FX gain/loss (see fxAdjustmentsByCustomer below).
+const SALES_PAYMENT_TYPES = ['Payment', 'customer_payment', 'BankRECEIVE'];
+// A multi-currency invoice is raised at one exchange rate and paid at another;
+// the difference is realized as a gain/loss at settlement, on a NON-asset line
+// of the customer's own payment transaction (e.g. QuickBooks: source_type
+// 'Payment', account "Exchange Gain or Loss"). The platform's own Sales by
+// Customer total includes this — confirmed against a live QuickBooks org
+// where the gap was ₹15,698.54, exactly the sum of these lines for the period
+// — so leaving it out understates the customer's true net sales value.
+const FX_ADJUSTMENT_RE = /exchange\s*(gain|loss)|reali[sz]ed\s*(currency|exchange)\s*(gain|loss)/i;
+
+// One row per (customer, fx adjustment amount) for the period — resolved via
+// a self-join to the SAME transaction's own Accounts Receivable line, which is
+// where the customer name actually lives (the FX line's own `transaction_details`
+// just says "Exchange Gain or Loss"). Additive and platform-agnostic: an org
+// with no such postings (most Zoho/Xero orgs today) gets an empty result back,
+// so this can never change a total where the pattern doesn't occur.
+async function fxAdjustmentsByCustomer(userId, orgId, from, to) {
+  const [rows] = await pool.execute(
+    `SELECT COALESCE(NULLIF(TRIM(cust.customer_name), ''), 'Unknown') AS customer,
+            ROUND(SUM(fx.credit - fx.debit), 2) AS total
+       FROM account_transactions fx
+       JOIN (
+         SELECT transaction_id, MIN(transaction_details) AS customer_name
+           FROM account_transactions
+          WHERE user_id = ? AND org_id = ?
+            AND account_type_code = 'accounts_receivable'
+            AND transaction_details IS NOT NULL AND TRIM(transaction_details) <> ''
+          GROUP BY transaction_id
+       ) cust ON cust.transaction_id = fx.transaction_id
+      WHERE fx.user_id = ? AND fx.org_id = ?
+        AND fx.source_type IN (${inList(SALES_PAYMENT_TYPES)})
+        AND fx.account_group <> 'asset'
+        AND fx.transaction_date BETWEEN ? AND ?
+        AND fx.account_name REGEXP ?
+      GROUP BY customer`,
+    [userId, orgId, userId, orgId, ...SALES_PAYMENT_TYPES, from, to, FX_ADJUSTMENT_RE.source]
+  );
+  const map = new Map();
+  for (const r of rows) {
+    const amt = round2(r.total);
+    if (amt) map.set(r.customer, amt);
+  }
+  return map;
+}
 
 function num(v) {
   const n = Number(v);
@@ -200,24 +258,51 @@ async function buildSalesByCustomer(userId, params = {}) {
   const { from, to } = resolveRange(params);
 
   // Primary: account_transactions (works for all 3 platforms, one query).
+  //
+  // Resolve customer PER DOCUMENT first (inner query, grouped by transaction_id),
+  // then group documents by that resolved customer — never group raw ledger rows
+  // directly by their own transaction_details. A document's non-asset (income)
+  // line sometimes carries line-item memo text instead of a customer name there
+  // (e.g. a QuickBooks Credit Memo whose GL report leaves that row's own "Name"
+  // cell blank — our sync then falls back to the memo, see quickbooksService.js),
+  // while its Accounts Receivable line — the sub-ledger control account actually
+  // tied to a customer — reliably carries the real name. Preferring the AR line
+  // per document avoids splitting one document's amount into a bogus, memo-named
+  // "customer" row (confirmed: every SALES_DOC_TYPES document across all 3
+  // platforms has an AR line, so the memo-only fallback below is theoretical).
   const [txnGrouped] = await pool.execute(
-    `SELECT COALESCE(NULLIF(TRIM(at.transaction_details), ''), 'Unknown') AS customer,
-            COUNT(DISTINCT CASE WHEN at.source_type IN (${inList(SALES_INVOICE_TYPES)})
-                                 THEN at.source_id END) AS cnt,
-            ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS total,
-            MAX(at.currency_code) AS currency
-       FROM account_transactions at
-      WHERE at.user_id = ? AND at.org_id = ?
-        AND at.source_type IN (${inList(SALES_DOC_TYPES)})
-        AND at.transaction_date BETWEEN ? AND ?
+    `SELECT COALESCE(NULLIF(TRIM(doc.customer), ''), 'Unknown') AS customer,
+            COUNT(DISTINCT CASE WHEN doc.source_type IN (${inList(SALES_INVOICE_TYPES)})
+                                 THEN doc.source_id END) AS cnt,
+            ROUND(SUM(doc.amount), 2) AS total,
+            MAX(doc.currency_code) AS currency
+       FROM (
+         SELECT at.transaction_id,
+                MAX(at.source_id) AS source_id,
+                MAX(at.source_type) AS source_type,
+                COALESCE(
+                  MAX(CASE WHEN at.account_type_code = 'accounts_receivable' THEN NULLIF(TRIM(at.transaction_details), '') END),
+                  MAX(CASE WHEN at.account_group <> 'asset' THEN NULLIF(TRIM(at.transaction_details), '') END)
+                ) AS customer,
+                ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS amount,
+                MAX(at.currency_code) AS currency_code
+           FROM account_transactions at
+          WHERE at.user_id = ? AND at.org_id = ?
+            AND at.source_type IN (${inList(SALES_DOC_TYPES)})
+            AND at.transaction_date BETWEEN ? AND ?
+          GROUP BY at.transaction_id
+       ) doc
       GROUP BY customer
       ORDER BY total DESC`,
     [...SALES_INVOICE_TYPES, userId, orgId, ...SALES_DOC_TYPES, from, to]
   );
 
   // Fallback: invoices table (for connections that haven't synced ledger lines
-  // yet — e.g. a brand-new Zoho connection before first sync).
+  // yet — e.g. a brand-new Zoho connection before first sync). Realized FX
+  // adjustments only ever exist once the ledger itself is synced, so they're
+  // deliberately skipped on this fallback path too — nothing to attribute them to.
   let grouped = txnGrouped;
+  let fx = new Map();
   if (!grouped.length) {
     const [invGrouped] = await pool.execute(
       `SELECT COALESCE(NULLIF(TRIM(customer_name), ''), 'Unknown') AS customer,
@@ -233,6 +318,8 @@ async function buildSalesByCustomer(userId, params = {}) {
       [userId, orgId, from, to]
     );
     grouped = invGrouped;
+  } else {
+    fx = await fxAdjustmentsByCustomer(userId, orgId, from, to);
   }
 
   const currency = grouped.find((r) => r.currency)?.currency || 'INR';
@@ -246,17 +333,28 @@ async function buildSalesByCustomer(userId, params = {}) {
   const rows = [];
   let totalAmount = 0;
   let totalCount = 0;
+  const seenFx = new Set();
   for (const r of grouped) {
-    const amt = num(r.total);
+    let amt = num(r.total);
     const cnt = Number(r.cnt) || 0;
+    if (fx.has(r.customer)) { amt = round2(amt + fx.get(r.customer)); seenFx.add(r.customer); }
     totalAmount += amt;
     totalCount += cnt;
     rows.push({ label: r.customer, level: 1, cells: { count: cnt, total: amt } });
   }
+  // A customer whose only activity in the period was a payment settling a
+  // PRIOR period's invoice (so they never appear in `grouped` above) still
+  // needs their realized FX adjustment counted — same as the platform does.
+  for (const [customer, amt] of fx) {
+    if (seenFx.has(customer)) continue;
+    totalAmount = round2(totalAmount + amt);
+    rows.push({ label: customer, level: 1, cells: { count: 0, total: amt } });
+  }
+  rows.sort((a, b) => (b.cells.total || 0) - (a.cells.total || 0));
   rows.push({
     label: 'Total',
     isTotal: true,
-    cells: { count: totalCount, total: totalAmount },
+    cells: { count: totalCount, total: round2(totalAmount) },
   });
 
   return {
@@ -293,15 +391,27 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
   // tax-liability, any contra-revenue-classified line) — never just its
   // account_group = 'income' line(s) alone, which silently drops whatever
   // portion lands on a differently-classified account (see buildSalesByCustomer
-  // for the full reasoning) — so group by source_id first to get one correct,
-  // fully-summed row per document, then nest under customer.
+  // for the full reasoning) — so group by transaction_id first to get one
+  // correct, fully-summed row per document, then nest under customer.
+  //
+  // `customer` is resolved from the document's Accounts Receivable line, not
+  // whichever line happens to be scanned — the income line's own
+  // transaction_details is sometimes line-item memo text rather than a
+  // customer name (e.g. a QuickBooks Credit Memo — see buildSalesByCustomer),
+  // and grouping by (source_id, transaction_details) as before would split
+  // that one document into two rows, one of them a bogus memo-named
+  // "customer". `description` keeps that non-asset line's own text separately
+  // — still useful context, just not a customer identity.
   const [txnRows] = await pool.execute(
-    `SELECT at.transaction_details AS customer,
-            at.source_id,
+    `SELECT COALESCE(
+              MAX(CASE WHEN at.account_type_code = 'accounts_receivable' THEN NULLIF(TRIM(at.transaction_details), '') END),
+              MAX(CASE WHEN at.account_group <> 'asset' THEN NULLIF(TRIM(at.transaction_details), '') END)
+            ) AS customer,
+            MAX(at.source_id) AS source_id,
             MAX(at.reference_number) AS invoice_number,
             DATE_FORMAT(MAX(at.transaction_date), '%Y-%m-%d') AS d,
             MAX(at.account_name) AS product,
-            at.transaction_details AS description,
+            MAX(CASE WHEN at.account_group <> 'asset' THEN at.transaction_details END) AS description,
             ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS amount,
             MAX(at.currency_code) AS currency_code,
             MAX(at.source_type) AS source_type
@@ -309,8 +419,8 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
       WHERE at.user_id = ? AND at.org_id = ?
         AND at.source_type IN (${inList(SALES_DOC_TYPES)})
         AND at.transaction_date BETWEEN ? AND ?
-      GROUP BY at.source_id, at.transaction_details
-      ORDER BY at.transaction_details, d, invoice_number`,
+      GROUP BY at.transaction_id
+      ORDER BY customer, d, invoice_number`,
     [userId, orgId, ...SALES_DOC_TYPES, from, to]
   );
 
@@ -418,6 +528,27 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
     }
   }
 
+  // Realized FX gain/loss on customer payment settlement (see buildSalesByCustomer
+  // for the full explanation) — same source/query, so this Detail report's total
+  // always ties to the Summary report's total exactly. Only meaningful once the
+  // ledger itself is synced (txnRows), same condition the Summary report uses.
+  if (txnRows.length) {
+    const fx = await fxAdjustmentsByCustomer(userId, orgId, from, to);
+    for (const [customer, amt] of fx) {
+      if (!groups.has(customer)) groups.set(customer, []);
+      groups.get(customer).push({
+        date:    to,
+        type:    'Exchange Gain/Loss',
+        num:     '',
+        product: '',
+        desc:    'Realized exchange gain/loss on payment settlement',
+        qty:     null,
+        price:   null,
+        amount:  amt,
+      });
+    }
+  }
+
   const columns = [
     { key: 'label',    label: 'Transaction date',        align: 'left'  },
     { key: 'type',     label: 'Transaction type',        align: 'left'  },
@@ -517,7 +648,7 @@ async function buildSalesByProductSummary(userId, params = {}) {
   const [invoices] = await pool.execute(
     `SELECT zoho_id, invoice_number, customer_name,
             DATE_FORMAT(date, '%Y-%m-%d') AS d, total, ROUND(tax_total, 2) AS tax_total,
-            currency_code, exchange_rate
+            currency_code
        FROM invoices
       WHERE user_id = ? AND org_id = ?
         AND date BETWEEN ? AND ?
@@ -544,11 +675,7 @@ async function buildSalesByProductSummary(userId, params = {}) {
     }
   }
 
-  // The report's own currency is always the org's base/reporting currency —
-  // never a per-invoice currency_code — because every amount below is
-  // converted to it (see `rate` in the loop) before being summed, so a report
-  // spanning invoices in several currencies still foots correctly.
-  const currency = await getBaseCurrency(orgId);
+  const currency = invoices.find((r) => r.currency_code)?.currency_code || 'INR';
 
   // product → { qty, amount, hasQty, entries[] }. entries feed the inline
   // drill-down: each underlying invoice line (customer / invoice# / date /
@@ -564,11 +691,6 @@ async function buildSalesByProductSummary(userId, params = {}) {
   };
   for (const inv of invoices) {
     const lines = linesByInvoice.get(String(inv.zoho_id)) || [];
-    // Every amount is native to the invoice's own currency_code — converted to
-    // the org's base currency (see `currency` above) via the invoice's own
-    // exchange_rate (the rate Zoho/QuickBooks/Xero themselves booked it at),
-    // never a live/current rate, so historical reports stay stable.
-    const rate = num(inv.exchange_rate) || 1;
     const entryBase = {
       name: inv.customer_name || '—',
       ref: inv.invoice_number || null,
@@ -595,7 +717,6 @@ async function buildSalesByProductSummary(userId, params = {}) {
         taxLeft = round2(taxLeft - taxPart);
         amount = round2(amount + taxPart);
       }
-      amount = round2(amount * rate);
       add(ln.product, ln.quantity, amount, { ...entryBase, amount });
     });
   }
@@ -727,7 +848,7 @@ async function buildArAgingSummary(userId, params = {}) {
   // Statuses excluded are the non-receivable ones across all three providers:
   // Zoho draft/void, Xero DRAFT/SUBMITTED/VOIDED/DELETED, QuickBooks drafts.
   const [invoices] = await pool.execute(
-    `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code, exchange_rate
+    `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code
        FROM invoices
       WHERE user_id = ? AND org_id = ?
         AND date <= ?
@@ -736,18 +857,8 @@ async function buildArAgingSummary(userId, params = {}) {
   );
 
   await attachAsOfBalances(invoices, userId, orgId, asOf);
-  // _balanceAsOf is reconstructed above entirely in the invoice's own native
-  // currency (payments/credit notes applied to it are booked the same way) —
-  // convert to the org's base currency only now, at the very end, so every
-  // customer/bucket total that follows sums correctly across currencies.
-  for (const inv of invoices) {
-    inv._balanceAsOf = round2(inv._balanceAsOf * (num(inv.exchange_rate) || 1));
-  }
 
-  // Always the org's base/reporting currency, never a per-invoice code — every
-  // amount below is already converted to it (see the loop above and `rate`
-  // further down), so a multi-currency org's totals still foot correctly.
-  const currency = await getBaseCurrency(orgId);
+  const currency = invoices.find((r) => r.currency_code)?.currency_code || 'INR';
 
   const columns = [
     { key: 'customer', label: 'Customer Name', align: 'left'  },
@@ -798,17 +909,14 @@ async function buildArAgingSummary(userId, params = {}) {
   // (proven — see zohoArAgingDetailService.js), so only synthetic (non-Zoho)
   // payment rows qualify: real Zoho ids are bare numeric, ours are `qbo:`/`xero:`.
   const [creditPayments] = await pool.execute(
-    `SELECT customer_name, date, unused_amount, exchange_rate
+    `SELECT customer_name, date, unused_amount
        FROM zb_customer_payments
       WHERE user_id = ? AND org_id = ? AND date <= ? AND unused_amount <> 0
         AND zoho_payment_id LIKE '%:%'`,
     [userId, orgId, ymd(asOf)]
   );
   for (const p of creditPayments) {
-    if (p.date && new Date(p.date) > asOf) continue;
-    if (fromDate && p.date && new Date(p.date) < fromDate) continue;
-    // The payment's own rate — it isn't necessarily the same invoice as above.
-    const credit = round2(-num(p.unused_amount) * (num(p.exchange_rate) || 1));
+    const credit = -num(p.unused_amount);
     const age = daysBetween(asOf, new Date(p.date));
     const bucket = bucketFor(age);
     const customer = (p.customer_name || '').trim() || 'Unknown';
@@ -839,7 +947,6 @@ async function buildArAgingSummary(userId, params = {}) {
       if (entries && entries.length) cellDrill[k.id] = entries;
     }
     cells.total = round2(BUCKETS.reduce((s, k) => s + b[k.id], 0));
-    // Total column drills to every entry across all buckets for this customer.
     const allEntries = BUCKETS.flatMap((k) => byCustomerDrill.get(customer)?.[k.id] || []);
     if (allEntries.length) cellDrill.total = allEntries;
     rows.push({ label: customer, level: 1, cells, cellDrill });
