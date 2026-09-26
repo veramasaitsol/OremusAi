@@ -83,6 +83,72 @@ export function exportRowsCSV(headers, rows, filename) {
   downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), `${buildFileName(filename)}.csv`);
 }
 
+// Excel counterpart of exportRowsCSV. Numeric cells stay numbers so they can be
+// summed/filtered in Excel. `titleLines` (optional) are printed above the header.
+export async function exportRowsXLSX(headers, rows, filename, titleLines = []) {
+  if (!rows?.length) return;
+  const XLSX = await import('xlsx');
+  const aoa = [...titleLines.map((t) => [t]), ...(titleLines.length ? [[]] : []), headers, ...rows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = headers.map((h, i) => ({ wch: i === 0 ? 12 : Math.max(12, String(h).length + 2) }));
+  const wb = XLSX.utils.book_new();
+  const sheetName = String(filename || 'Breakdown').replace(/[:\\/?*[\]]+/g, ' ').slice(0, 31) || 'Breakdown';
+  XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  XLSX.writeFile(wb, `${buildFileName(filename)}.xlsx`);
+}
+
+// A drill-down breakdown as an export sheet: every entry, then a reconciliation
+// footer (lines total → ÷ divisor for an average → report figure → difference),
+// so a gap against another platform can be traced entry by entry.
+export function breakdownToSheet({ name, title, subtitle, rows = [], divisor, divisorLabel, reportFigure, currency }) {
+  const cur = currency || '';
+  const n = (v) => (v == null || v === '' || Number.isNaN(Number(v)) ? '' : Number(v));
+  const headers = ['Date', 'Reference', 'Name / Description', 'Account', 'Source', 'Type',
+    'Original Currency', 'Exchange Rate', 'Original Amount', `Amount${cur ? ` (${cur})` : ''}`];
+  const body = rows.map((e) => [e.date || '', e.ref || '', e.name || '', e.account || '', e.source || '',
+    e.type || '', e.currency || '', n(e.rate), n(e.nativeAmount), n(e.amount)]);
+  const total = Math.round(rows.reduce((s, e) => s + (Number(e.amount) || 0), 0) * 100) / 100;
+  const pad = (label, v) => ['', '', label, '', '', '', '', '', '', v];
+  const footer = [[], pad(`Total of ${rows.length} entries`, total)];
+  let explained = total;
+  if (divisor) {
+    explained = Math.round((total / divisor) * 100) / 100;
+    footer.push(pad(`÷ ${divisor} ${divisorLabel || ''} = average`.trim(), explained));
+  }
+  if (reportFigure != null && !Number.isNaN(Number(reportFigure))) {
+    footer.push(pad('Figure on report', Math.round(Number(reportFigure) * 100) / 100));
+    footer.push(pad('Difference', Math.round((explained - Number(reportFigure)) * 100) / 100));
+  }
+  return {
+    name: name || title || 'Breakdown',
+    headers,
+    rows: [...body, ...footer],
+    titleLines: [title, subtitle].filter(Boolean),
+  };
+}
+
+// Several row sets into one workbook — one sheet each. `sheets` =
+// [{ name, headers, rows, titleLines? }]. Excel caps sheet names at 31 chars and
+// forbids : \ / ? * [ ], and names must be unique.
+export async function exportSheetsXLSX(sheets, filename) {
+  const usable = (sheets || []).filter((s) => s.rows?.length);
+  if (!usable.length) return;
+  const XLSX = await import('xlsx');
+  const wb = XLSX.utils.book_new();
+  const used = new Set();
+  for (const s of usable) {
+    const title = s.titleLines || [];
+    const aoa = [...title.map((t) => [t]), ...(title.length ? [[]] : []), s.headers, ...s.rows];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = s.headers.map((h, i) => ({ wch: i === 0 ? 12 : Math.max(12, String(h).length + 2) }));
+    let name = String(s.name || 'Sheet').replace(/[:\\/?*[\]]+/g, ' ').slice(0, 31) || 'Sheet';
+    for (let n = 2; used.has(name); n += 1) name = `${name.slice(0, 28)} ${n}`;
+    used.add(name);
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  }
+  XLSX.writeFile(wb, `${buildFileName(filename)}.xlsx`);
+}
+
 export async function exportReportXLSX(data, reportName) {
   if (!data) return;
   const XLSX = await import('xlsx');

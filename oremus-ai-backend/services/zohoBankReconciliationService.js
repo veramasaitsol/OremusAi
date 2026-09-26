@@ -150,7 +150,8 @@ async function buildBankReconciliation(userId, params = {}) {
   const [book] = await pool.execute(
     `SELECT id, platform, account_id, account_name, transaction_id, transaction_date,
             transaction_type, source_type, source_id, transaction_number,
-            reference_number, transaction_details, debit, credit
+            reference_number, transaction_details,
+            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND LOWER(account_type_code) IN ('bank', 'cash')

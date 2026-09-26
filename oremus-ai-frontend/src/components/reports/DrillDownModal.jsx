@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { X } from 'lucide-react';
+import { X, Download } from 'lucide-react';
 import { fmt } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { breakdownToSheet, exportRowsCSV, exportRowsXLSX } from '../../utils/exportReport.js';
 
 const PAGE_SIZE =100;
 
@@ -12,6 +13,14 @@ export default function DrillDownModal({
   count = 0,        // total count (may exceed rows.length if backend still caps)
   currency = 'USD',
   columns,          // optional override: [{ key, label, align?, className? }]
+  // Opt-in (Executive Summary): signed amounts that sum to the report figure,
+  // an on-screen reconciliation line, and Excel/CSV export of every entry.
+  signed = false,
+  exportName,       // file name; export buttons shown only when set
+  currencyCode,     // ISO code for the export's amount column
+  reportFigure,     // the number on the report this breakdown explains
+  divisor,          // for an average: the count the total is divided by
+  divisorLabel,
 }) {
   const [page, setPage] = useState(0);
 
@@ -27,7 +36,21 @@ export default function DrillDownModal({
 
   const fmtAmount = (v) => {
     if (v == null) return '';
-    return fmt(Math.abs(v), { dec: 2, sign: currency });
+    if (!signed) return fmt(Math.abs(v), { dec: 2, sign: currency });
+    const s = fmt(Math.abs(v), { dec: 2, sign: currency });
+    return v < 0 ? `(${s})` : s;
+  };
+
+  const linesTotal = Math.round(rows.reduce((s, e) => s + (Number(e.amount) || 0), 0) * 100) / 100;
+  const explained = divisor ? Math.round((linesTotal / divisor) * 100) / 100 : linesTotal;
+  const diff = reportFigure != null ? Math.round((explained - Number(reportFigure)) * 100) / 100 : null;
+
+  const doExport = (format) => {
+    const sheet = breakdownToSheet({
+      name: title, title, subtitle, rows, divisor, divisorLabel, reportFigure, currency: currencyCode,
+    });
+    if (format === 'xlsx') exportRowsXLSX(sheet.headers, sheet.rows, exportName, sheet.titleLines);
+    else exportRowsCSV(sheet.headers, sheet.rows, exportName);
   };
 
   // Default columns (Date, Reference, Account, Source, Amount)
@@ -53,10 +76,45 @@ export default function DrillDownModal({
               {subtitle ? `${subtitle} · ` : ''}{totalDisplay} {totalDisplay === 1 ? 'entry' : 'entries'}
             </div>
           </div>
-          <button onClick={onClose} className="h-7 w-7 grid place-items-center rounded-md text-navy-400 hover:bg-navy-100 dark:hover:bg-navy-800">
-            <X size={15} />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {exportName && rows.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => doExport('xlsx')}
+                  className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-navy-600 dark:text-navy-300 hover:text-sky-600"
+                >
+                  <Download size={13} /> Excel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => doExport('csv')}
+                  className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-navy-600 dark:text-navy-300 hover:text-sky-600"
+                >
+                  <Download size={13} /> CSV
+                </button>
+              </>
+            )}
+            <button onClick={onClose} className="h-7 w-7 grid place-items-center rounded-md text-navy-400 hover:bg-navy-100 dark:hover:bg-navy-800">
+              <X size={15} />
+            </button>
+          </div>
         </div>
+        {signed && rows.length > 0 && (
+          <div className="px-4 py-2 border-b border-navy-100 dark:border-navy-800 bg-navy-50/60 dark:bg-navy-950/40 text-[11.5px] text-navy-600 dark:text-navy-300 flex flex-wrap gap-x-4 gap-y-1">
+            <span>Total of entries: <b className="tabular-nums">{fmtAmount(linesTotal)}</b></span>
+            {divisor ? <span>÷ {divisor} {divisorLabel} = <b className="tabular-nums">{fmtAmount(explained)}</b></span> : null}
+            {reportFigure != null && (
+              <span>
+                Report: <b className="tabular-nums">{fmtAmount(Number(reportFigure))}</b>
+                {' · '}
+                <span className={diff ? 'text-rose-600 font-semibold' : 'text-emerald-600 font-semibold'}>
+                  {diff ? `Difference ${fmtAmount(diff)}` : 'Ties'}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Table */}
         <div className="flex-1 overflow-y-auto scroll-thin">

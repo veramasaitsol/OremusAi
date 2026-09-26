@@ -467,21 +467,21 @@ async function localPL(provider, effUserId, connRef, from, to) {
       // Fallback: if computePLFigures fails (e.g. no org_id), use legacy gross sums
       const base = [effUserId, connRef, from, to];
       const rev = await sumOne(
-        `SELECT COALESCE(SUM(credit),0) v FROM account_transactions
-          WHERE user_id=? AND org_id=? AND account_group='income' AND credit>0
+        `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) v FROM account_transactions
+          WHERE user_id=? AND org_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
             AND (account_type_code IS NULL OR account_type_code <> 'other_income')
             AND transaction_date BETWEEN ? AND ?`, base);
       const otherIncome = await sumOne(
-        `SELECT COALESCE(SUM(credit),0) v FROM account_transactions
-          WHERE user_id=? AND org_id=? AND account_group='income' AND credit>0
+        `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) v FROM account_transactions
+          WHERE user_id=? AND org_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
             AND account_type_code = 'other_income'
             AND transaction_date BETWEEN ? AND ?`, base);
       const exp = await sumOne(
-        `SELECT COALESCE(SUM(debit),0) v FROM account_transactions
-          WHERE user_id=? AND org_id=? AND account_group='expense' AND debit>0
+        `SELECT COALESCE(SUM(COALESCE(base_debit, debit)),0) v FROM account_transactions
+          WHERE user_id=? AND org_id=? AND account_group='expense' AND COALESCE(base_debit, debit) > 0
             AND transaction_date BETWEEN ? AND ?`, base);
-      const expLike = `SELECT COALESCE(SUM(debit),0) v FROM account_transactions
-          WHERE user_id=? AND org_id=? AND account_group='expense' AND debit>0
+      const expLike = `SELECT COALESCE(SUM(COALESCE(base_debit, debit)),0) v FROM account_transactions
+          WHERE user_id=? AND org_id=? AND account_group='expense' AND COALESCE(base_debit, debit) > 0
             AND transaction_date BETWEEN ? AND ? AND LOWER(account_name) REGEXP ?`;
       const cogs         = await sumOne(expLike, [...base, 'cost of goods|cogs|cost of sales']);
       const depreciation = await sumOne(expLike, [...base, 'deprecia|amorti']);
@@ -602,12 +602,12 @@ async function localCashFlow(provider, effUserId, connRef, from, to) {
   // account's CUMULATIVE balance to Xero's trial balance and are all dated the
   // last ledger day, so inside a period they load prior years onto it.
   const income = await sumOne(
-    `SELECT COALESCE(SUM(credit) - SUM(debit),0) v FROM account_transactions
+    `SELECT COALESCE(SUM(COALESCE(base_credit, credit)) - SUM(COALESCE(base_debit, debit)),0) v FROM account_transactions
       WHERE user_id=? AND org_id=? AND account_group='income'
         AND transaction_id NOT LIKE 'xero-recon:%'
         AND transaction_date BETWEEN ? AND ?`, base);
   const expense = await sumOne(
-    `SELECT COALESCE(SUM(debit) - SUM(credit),0) v FROM account_transactions
+    `SELECT COALESCE(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)),0) v FROM account_transactions
       WHERE user_id=? AND org_id=? AND account_group='expense'
         AND transaction_id NOT LIKE 'xero-recon:%'
         AND transaction_date BETWEEN ? AND ?`, base);
@@ -615,7 +615,7 @@ async function localCashFlow(provider, effUserId, connRef, from, to) {
 
   // Non-cash add-back: depreciation / amortization (a subset of expense).
   const depreciation = await sumOne(
-    `SELECT COALESCE(SUM(debit) - SUM(credit),0) v FROM account_transactions
+    `SELECT COALESCE(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)),0) v FROM account_transactions
       WHERE user_id=? AND org_id=? AND account_group='expense'
         AND LOWER(account_name) REGEXP 'deprecia|amorti'
         AND transaction_id NOT LIKE 'xero-recon:%'
@@ -624,12 +624,12 @@ async function localCashFlow(provider, effUserId, connRef, from, to) {
   // Working-capital movement over the period. Asset increase uses cash (−);
   // liability increase frees cash (+).
   const assetChange = await sumOne(
-    `SELECT COALESCE(SUM(debit) - SUM(credit),0) v FROM account_transactions
+    `SELECT COALESCE(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)),0) v FROM account_transactions
       WHERE user_id=? AND org_id=?
         AND account_type_code IN ('accounts_receivable','other_current_asset','other_asset')
         AND transaction_date BETWEEN ? AND ?`, base);
   const liabChange = await sumOne(
-    `SELECT COALESCE(SUM(credit) - SUM(debit),0) v FROM account_transactions
+    `SELECT COALESCE(SUM(COALESCE(base_credit, credit)) - SUM(COALESCE(base_debit, debit)),0) v FROM account_transactions
       WHERE user_id=? AND org_id=?
         AND account_type_code IN ('accounts_payable','other_current_liability')
         AND transaction_date BETWEEN ? AND ?`, base);
@@ -640,7 +640,7 @@ async function localCashFlow(provider, effUserId, connRef, from, to) {
   // depreciation contra-asset accounts. Clamp at 0 so a period of net disposals
   // doesn't invert Free Cash Flow.
   const capexRaw = await sumOne(
-    `SELECT COALESCE(SUM(debit) - SUM(credit),0) v FROM account_transactions
+    `SELECT COALESCE(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)),0) v FROM account_transactions
       WHERE user_id=? AND org_id=? AND account_type_code='fixed_asset'
         AND LOWER(account_name) NOT REGEXP 'accumulated deprecia'
         AND transaction_date BETWEEN ? AND ?`, base);

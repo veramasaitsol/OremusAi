@@ -151,7 +151,7 @@ async function buildCashSummary(userId, params = {}) {
   const [cashLines] = await pool.execute(
     `SELECT transaction_id, source_id, transaction_date AS dt,
             reference_number AS ref, account_name AS cash_account,
-            debit, credit
+            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date BETWEEN ? AND ?
@@ -167,7 +167,8 @@ async function buildCashSummary(userId, params = {}) {
   const counterpartsBySource = {};
   if (sourceIds.length) {
     const [cp] = await pool.query(
-      `SELECT source_id, account_name, account_group, debit, credit
+      `SELECT source_id, account_name, account_group,
+              COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
          FROM account_transactions
         WHERE user_id = ? AND org_id = ?${platClause}
           AND account_type_code NOT IN ('bank', 'cash')
@@ -255,7 +256,7 @@ async function buildCashSummary(userId, params = {}) {
   // Opening cash = cumulative net of cash-account movements before the period.
   // (Balance figure → recon plugs stay in, so it ties to Xero.)
   const [[openRow]] = await pool.execute(
-    `SELECT SUM(debit) - SUM(credit) AS net
+    `SELECT SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date < ?
@@ -268,7 +269,7 @@ async function buildCashSummary(userId, params = {}) {
   // they don't distort the income/expense categories), but the Cash Balance is
   // a BALANCE and must still tie to Xero — add their net cash effect back here.
   const [[reconRow]] = await pool.execute(
-    `SELECT SUM(debit) - SUM(credit) AS net
+    `SELECT SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date BETWEEN ? AND ?

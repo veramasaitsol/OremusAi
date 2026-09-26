@@ -160,8 +160,8 @@ function priorWindow(from, to) {
 async function periodPL(userId, orgId, from, to) {
   const [rows] = await pool.execute(
     `SELECT account_type_code AS code,
-            SUM(debit)  AS d,
-            SUM(credit) AS c
+            SUM(COALESCE(base_debit, debit))  AS d,
+            SUM(COALESCE(base_credit, credit)) AS c
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?
@@ -194,8 +194,8 @@ async function periodPL(userId, orgId, from, to) {
 // every provider posts into this shared ledger.
 async function periodCash(userId, orgId, from, to) {
   const [[r]] = await pool.execute(
-    `SELECT COALESCE(SUM(debit), 0)  AS received,
-            COALESCE(SUM(credit), 0) AS spent
+    `SELECT COALESCE(SUM(COALESCE(base_debit, debit)), 0)  AS received,
+            COALESCE(SUM(COALESCE(base_credit, credit)), 0) AS spent
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?
@@ -229,53 +229,75 @@ function summariseBucket(list) {
   return {
     rows: sorted,
     count: sorted.length,
+    total: Math.round(sorted.reduce((s, e) => s + e.amount, 0) * 100) / 100,
   };
 }
 
+// One drill-down entry. `amount` is signed so the entries SUM to the figure they
+// explain (an expense credit / income debit is negative); the rest is context
+// for comparing line by line against the platform (original currency + rate).
+const BD_COLS = `transaction_date AS dt, reference_number AS ref, account_name AS account,
+            source_type AS src, transaction_type AS ttype, transaction_details AS details,
+            account_type_code AS code, currency_code AS cur, exchange_rate AS rate,
+            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
+            debit AS ndebit, credit AS ncredit`;
+function bdEntry(l, amount, nativeAmount) {
+  return {
+    date: fmtDate(l.dt),
+    ref: l.ref || '',
+    account: l.account || '',
+    source: l.src || '',
+    type: l.ttype || '',
+    name: String(l.details || '').trim(),
+    currency: l.cur || '',
+    rate: l.rate != null ? num(l.rate) : null,
+    nativeAmount: Math.round(nativeAmount * 100) / 100,
+    amount: Math.round(amount * 100) / 100,
+  };
+}
+
+// Each bucket holds exactly the lines its headline sums, with the SAME filters
+// (cash rows mirror periodCash, P&L rows mirror periodPL) and the same sign —
+// so a breakdown's total always equals the number shown on the report.
 async function periodBreakdowns(userId, orgId, from, to) {
-  const [lines] = await pool.execute(
-    `SELECT transaction_date AS dt, reference_number AS ref, account_name AS account,
-            source_type AS src, account_type_code AS code, debit, credit
+  const [cash] = await pool.execute(
+    `SELECT ${BD_COLS}
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?
-        AND account_type_code IN
-            ('bank', 'cash', 'income', 'other_income', 'cost_of_goods_sold',
-             'expense', 'other_expense', 'accounts_receivable')
+        AND account_type_code IN ('bank', 'cash')
         ${EXCLUDE_RECON}
         ${EXCLUDE_NON_BANK}
         ${EXCLUDE_CLEARING}
         ${EXCLUDE_ADJUSTMENTS}`,
     [userId, orgId, from, to]
   );
-  const buckets = {
-    received: [], spent: [], income: [], otherIncome: [],
-    cogs: [], totalExpenses: [], invAvg: [],
+  const [pl] = await pool.execute(
+    `SELECT ${BD_COLS}
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ?
+        AND transaction_date BETWEEN ? AND ?
+        AND account_group IN ('income', 'expense')
+        AND account_type_code IN ('income', 'other_income', 'cost_of_goods_sold', 'expense', 'other_expense')
+        ${EXCLUDE_RECON}`,
+    [userId, orgId, from, to]
+  );
+  const buckets = { received: [], spent: [], income: [], otherIncome: [], cogs: [], totalExpenses: [] };
+  for (const l of cash) {
+    // Received = Σ debits and Spent = Σ credits on cash accounts, negatives included.
+    if (num(l.debit) !== 0) buckets.received.push(bdEntry(l, num(l.debit), num(l.ndebit)));
+    if (num(l.credit) !== 0) buckets.spent.push(bdEntry(l, num(l.credit), num(l.ncredit)));
+  }
+  const BUCKET_OF = {
+    income: ['income', 1], other_income: ['otherIncome', 1],
+    cost_of_goods_sold: ['cogs', -1], expense: ['totalExpenses', -1], other_expense: ['totalExpenses', -1],
   };
-  for (const l of lines) {
-    const debit = num(l.debit);
-    const credit = num(l.credit);
-    const base = {
-      date: fmtDate(l.dt),
-      ref: l.ref || '',
-      account: l.account || '',
-      source: l.src || '',
-    };
-    const code = l.code;
-    if (code === 'bank' || code === 'cash') {
-      if (debit > 0) buckets.received.push({ ...base, amount: debit });
-      if (credit > 0) buckets.spent.push({ ...base, amount: credit });
-    } else if (code === 'income' && credit > 0) {
-      buckets.income.push({ ...base, amount: credit });
-    } else if (code === 'other_income' && credit > 0) {
-      buckets.otherIncome.push({ ...base, amount: credit });
-    } else if (code === 'cost_of_goods_sold' && debit > 0) {
-      buckets.cogs.push({ ...base, amount: debit });
-    } else if ((code === 'expense' || code === 'other_expense') && debit > 0) {
-      buckets.totalExpenses.push({ ...base, amount: debit });
-    } else if (code === 'accounts_receivable' && debit > 0) {
-      buckets.invAvg.push({ ...base, amount: debit });
-    }
+  for (const l of pl) {
+    const [key, sign] = BUCKET_OF[l.code];
+    // Income is credit-normal (credit − debit), costs debit-normal (debit − credit).
+    const amt = sign * (num(l.credit) - num(l.debit));
+    if (amt === 0) continue;
+    buckets[key].push(bdEntry(l, amt, sign * (num(l.ncredit) - num(l.ndebit))));
   }
   const out = {};
   for (const k of Object.keys(buckets)) out[k] = summariseBucket(buckets[k]);
@@ -310,7 +332,7 @@ async function periodSales(userId, orgId, from, to) {
   // tax (a liability, not sales). Reading the income side of each invoice
   // document gets that on every platform without parsing per-line tax.
   const [[v]] = await pool.execute(
-    `SELECT COALESCE(SUM(i.credit - i.debit), 0) AS t
+    `SELECT COALESCE(SUM(COALESCE(i.base_credit, i.credit) - COALESCE(i.base_debit, i.debit)), 0) AS t
        FROM account_transactions i
       WHERE i.user_id = ? AND i.org_id = ?
         AND i.transaction_date BETWEEN ? AND ?
@@ -329,7 +351,7 @@ async function periodSales(userId, orgId, from, to) {
   // note need not touch a revenue account at all — a tax-withholding credit note
   // debits a TDS asset — yet it still cuts the value billed to the customer.
   const [[cn]] = await pool.execute(
-    `SELECT COALESCE(SUM(credit - debit), 0) AS t
+    `SELECT COALESCE(SUM(COALESCE(base_credit, credit) - COALESCE(base_debit, debit)), 0) AS t
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?
@@ -340,7 +362,46 @@ async function periodSales(userId, orgId, from, to) {
   );
   const count = num(c.n);
   const total = num(v.t) - num(cn.t);
-  return { count, avg: count ? total / count : 0 };
+
+  // Drill-down: the income lines of those invoices plus the credit notes
+  // (negative) — same WHERE clauses as the totals above, so they sum to the
+  // average's numerator; the average is that total ÷ `count` invoices.
+  const [valueLines] = await pool.execute(
+    `SELECT ${BD_COLS}
+       FROM account_transactions i
+      WHERE i.user_id = ? AND i.org_id = ?
+        AND i.transaction_date BETWEEN ? AND ?
+        AND i.account_group = 'income'
+        AND i.transaction_id NOT LIKE 'xero-recon:%'
+        AND i.transaction_id IN (
+              SELECT ar.transaction_id FROM account_transactions ar
+               WHERE ar.user_id = i.user_id AND ar.org_id = i.org_id
+                 AND ar.transaction_date BETWEEN ? AND ?
+                 AND ar.account_type_code = 'accounts_receivable'
+                 AND ar.debit > 0)`,
+    [userId, orgId, from, to, from, to]
+  );
+  const [cnLines] = await pool.execute(
+    `SELECT ${BD_COLS}
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ?
+        AND transaction_date BETWEEN ? AND ?
+        AND account_type_code = 'accounts_receivable'
+        AND source_type IN (${SALES_CREDIT_TYPES.map(() => '?').join(', ')})
+        ${EXCLUDE_RECON}`,
+    [userId, orgId, from, to, ...SALES_CREDIT_TYPES]
+  );
+  const list = [];
+  for (const l of valueLines) {
+    const amt = num(l.credit) - num(l.debit);
+    if (amt !== 0) list.push(bdEntry(l, amt, num(l.ncredit) - num(l.ndebit)));
+  }
+  for (const l of cnLines) {
+    const amt = -(num(l.credit) - num(l.debit));
+    if (amt !== 0) list.push(bdEntry(l, amt, -(num(l.ncredit) - num(l.ndebit))));
+  }
+  const breakdown = { ...summariseBucket(list), divisor: count, divisorLabel: 'invoices' };
+  return { count, avg: count ? total / count : 0, breakdown };
 }
 
 // Balance-sheet balances as of a date (cumulative ledger).
@@ -357,8 +418,8 @@ async function asOfBalances(userId, orgId, asOf) {
     `SELECT account_group AS grp,
             CASE WHEN account_name LIKE '%TDS Control%' THEN 'tds_control'
                  ELSE account_type_code END AS code,
-            SUM(debit)  AS d,
-            SUM(credit) AS c
+            SUM(COALESCE(base_debit, debit))  AS d,
+            SUM(COALESCE(base_credit, credit)) AS c
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date <= ?
@@ -416,7 +477,7 @@ async function metricsFor(userId, orgId, from, to) {
 
   return {
     // Drill-down entries backing each period-flow metric (keyed by metric name).
-    _bd: breakdowns,
+    _bd: { ...breakdowns, invAvg: sales.breakdown },
     // Cash
     received: cash.received,
     spent: cash.spent,

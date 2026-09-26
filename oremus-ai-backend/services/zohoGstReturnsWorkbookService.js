@@ -228,9 +228,9 @@ const JRNL_TYPES = "('ManualJournal','Manual Journal','journal','Journal Entry',
 async function buildLedgerGstReturns(userId, orgId, from, to, platform) {
   const [outputRows] = await pool.execute(
     `SELECT ${LEVY_OF} AS levy,
-            ROUND(SUM(CASE WHEN transaction_type IN ${SALES_TYPES} THEN credit - debit ELSE 0 END), 2) AS origin_tax,
-            ROUND(SUM(CASE WHEN transaction_type IN ${JRNL_TYPES}  THEN credit - debit ELSE 0 END), 2) AS jrnl_tax,
-            ROUND(SUM(credit - debit), 2) AS net_tax
+            ROUND(SUM(CASE WHEN transaction_type IN ${SALES_TYPES} THEN COALESCE(base_credit, credit) - COALESCE(base_debit, debit) ELSE 0 END), 2) AS origin_tax,
+            ROUND(SUM(CASE WHEN transaction_type IN ${JRNL_TYPES}  THEN COALESCE(base_credit, credit) - COALESCE(base_debit, debit) ELSE 0 END), 2) AS jrnl_tax,
+            ROUND(SUM(COALESCE(base_credit, credit) - COALESCE(base_debit, debit)), 2) AS net_tax
        FROM account_transactions
       WHERE user_id = ? AND org_id = ? AND ${OUT_LIKE}
         AND transaction_date BETWEEN ? AND ?
@@ -241,9 +241,9 @@ async function buildLedgerGstReturns(userId, orgId, from, to, platform) {
 
   const [inputRows] = await pool.execute(
     `SELECT ${LEVY_OF} AS levy,
-            ROUND(SUM(CASE WHEN transaction_type IN ${BILL_TYPES} THEN debit - credit ELSE 0 END), 2) AS origin_tax,
-            ROUND(SUM(CASE WHEN transaction_type IN ${JRNL_TYPES} THEN debit ELSE 0 END), 2) AS jrnl_tax,
-            ROUND(SUM(debit - credit), 2) AS net_tax
+            ROUND(SUM(CASE WHEN transaction_type IN ${BILL_TYPES} THEN COALESCE(base_debit, debit) - COALESCE(base_credit, credit) ELSE 0 END), 2) AS origin_tax,
+            ROUND(SUM(CASE WHEN transaction_type IN ${JRNL_TYPES} THEN COALESCE(base_debit, debit) ELSE 0 END), 2) AS jrnl_tax,
+            ROUND(SUM(COALESCE(base_debit, debit) - COALESCE(base_credit, credit)), 2) AS net_tax
        FROM account_transactions
       WHERE user_id = ? AND org_id = ? AND ${IN_LIKE}
         AND transaction_date BETWEEN ? AND ?
@@ -273,7 +273,8 @@ async function buildLedgerGstReturns(userId, orgId, from, to, platform) {
   async function levyBreakdown(likeClause, typesClause) {
     const [rows] = await pool.execute(
       `SELECT ${LEVY_OF} AS levy, transaction_number, reference_number, transaction_date,
-              transaction_type, source_type, credit, debit,
+              transaction_type, source_type,
+              COALESCE(base_credit, credit) AS credit, COALESCE(base_debit, debit) AS debit,
               (transaction_type IN ${typesClause}) AS is_origin
          FROM account_transactions
         WHERE user_id = ? AND org_id = ? AND ${likeClause}
@@ -581,7 +582,7 @@ async function buildGstReturnsWorkbook(userId, params = {}) {
   // its own breakdown entry rather than one lump ledger total.
   const [rcmTaxRows] = await pool.execute(
     `SELECT at.source_id, at.transaction_number, at.transaction_date, at.account_name,
-            SUM(at.credit) - SUM(at.debit) AS amount,
+            SUM(COALESCE(at.base_credit, at.credit)) - SUM(COALESCE(at.base_debit, at.debit)) AS amount,
             MAX(b.vendor_name) AS vendor_name, MAX(b.bill_number) AS bill_number
        FROM account_transactions at
        LEFT JOIN bills b ON b.zoho_id = at.source_id COLLATE utf8mb4_unicode_ci

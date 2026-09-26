@@ -141,7 +141,15 @@ router.get('/ledger', async (req, res) => {
     // posting stamped with a time on the last day isn't dropped.
     const toEnd = to ? `${to} 23:59:59` : null;
     const validDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
-    const isXeroLedger = conn.provider === 'xero';
+    // resolveProvider checks Zoho first when an org is selected and can hand back
+    // provider 'zoho' for a Xero tenant, so decide from the org itself.
+    let isXeroLedger = conn.provider === 'xero';
+    if (!isXeroLedger) {
+      try {
+        const [[xo]] = await pool.execute('SELECT 1 AS x FROM xero_organizations WHERE tenant_id = ? LIMIT 1', [org]);
+        isXeroLedger = !!xo;
+      } catch (_) { /* table absent on this deployment — not a Xero ledger */ }
+    }
 
     const SRC_TYPE = {
       invoice: 'Invoice', bill: 'Bill', expense: 'Expense', journal: 'Journal',
@@ -150,7 +158,8 @@ router.get('/ledger', async (req, res) => {
     const XERO_TYPE_LABEL = {
       ACCREC: 'Invoice', ACCPAY: 'Bill', ACCPAYCREDIT: 'Bill Credit',
       ACCRECCREDIT: 'Credit Note', BankSPEND: 'Expense', BankRECEIVE: 'Deposit',
-      'BankSPEND-OVERPAYMENT': 'Expense', ManualJournal: 'Journal',
+      'BankSPEND-OVERPAYMENT': 'Expense', ManualJournal: 'Manual Journal',
+      'xero-fx-unrealised': 'Unrealised FX Revaluation',
       ACCRECPAYMENT: 'Receivable Payment', ACCPAYPAYMENT: 'Payable Payment',
       'BankSPEND-PREPAYMENT': 'Prepayment', 'BankRECEIVE-PREPAYMENT': 'Prepayment',
       'BankRECEIVE-OVERPAYMENT': 'Overpayment',
@@ -193,31 +202,42 @@ router.get('/ledger', async (req, res) => {
     //    (recon plugs always included for a BS account), in the BS sign.
     let opening = 0;
     if (from && validDate(from)) {
+      const d = new Date(from);
+      const fyStart = Number.isNaN(d.getTime())
+        ? null
+        : `${d.getMonth() + 1 >= 4 ? d.getFullYear() : d.getFullYear() - 1}-04-01`;
+      // A Xero P&L account opens at its year-to-date movement (0 at FY start), as
+      // in Xero's Account Transactions and our own General Ledger — never all
+      // prior years plus the Trial-Balance true-up plugs, which made every Xero
+      // P&L drill open at minus its period total and close at zero.
+      const xeroPl = isXeroLedger && isPlAccount && fyStart;
       const obRows = await softRows(
-        `SELECT COALESCE(SUM(debit) - SUM(credit), 0) AS opening
-           FROM account_transactions
-          WHERE user_id = ? AND org_id = ? AND account_id = ?
-            AND (transaction_date < ?${reconExcl}
-                 OR transaction_id LIKE 'xero-recon:%')`,
-        [uid, org, acct, from]
+        xeroPl
+          ? `SELECT COALESCE(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)), 0) AS opening
+               FROM account_transactions
+              WHERE user_id = ? AND org_id = ? AND account_id = ?
+                AND transaction_date >= ? AND transaction_date < ?
+                AND transaction_id NOT LIKE 'xero-recon:%'`
+          : `SELECT COALESCE(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)), 0) AS opening
+               FROM account_transactions
+              WHERE user_id = ? AND org_id = ? AND account_id = ?
+                AND (transaction_date < ?${reconExcl}
+                     OR transaction_id LIKE 'xero-recon:%')`,
+        xeroPl ? [uid, org, acct, fyStart, from] : [uid, org, acct, from]
       );
       opening = round2(Number(obRows[0]?.opening || 0) * sign);
 
       // Retained Earnings carries pre-FY accumulated P&L on the Balance Sheet —
       // fold it into the opening so the drill reconciles to that line.
       if (creditNormal && /retained\s+earnings/i.test(accountName)) {
-        const d = new Date(from);
-        const fyStart = Number.isNaN(d.getTime())
-          ? null
-          : `${d.getMonth() + 1 >= 4 ? d.getFullYear() : d.getFullYear() - 1}-04-01`;
         if (fyStart) {
           const pi = await softRows(
-            `SELECT COALESCE(SUM(credit - debit), 0) AS v FROM account_transactions
+            `SELECT COALESCE(SUM(COALESCE(base_credit, credit) - COALESCE(base_debit, debit)), 0) AS v FROM account_transactions
               WHERE user_id = ? AND org_id = ? AND account_group = 'income' AND transaction_date < ?`,
             [uid, org, fyStart]
           );
           const pe = await softRows(
-            `SELECT COALESCE(SUM(debit - credit), 0) AS v FROM account_transactions
+            `SELECT COALESCE(SUM(COALESCE(base_debit, debit) - COALESCE(base_credit, credit)), 0) AS v FROM account_transactions
               WHERE user_id = ? AND org_id = ? AND account_group = 'expense' AND transaction_date < ?`,
             [uid, org, fyStart]
           );
@@ -238,7 +258,9 @@ router.get('/ledger', async (req, res) => {
     try {
       [zrows] = await pool.execute(
         `SELECT transaction_date, transaction_type, transaction_id, transaction_number,
-                reference_number, account_name, transaction_details, debit, credit,
+                reference_number, account_name, transaction_details,
+                COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
+                debit AS native_debit, credit AS native_credit, currency_code, exchange_rate,
                 source_id, source_type
            FROM account_transactions
           WHERE ${where.join(' AND ')}
@@ -295,12 +317,11 @@ router.get('/ledger', async (req, res) => {
       let docNumber = r.transaction_number || r.reference_number || '';
       if (isXeroLedger) {
         // Invoice/bill lines resolve their number from the silver table (doc.num).
-        // Payment / credit-note lines aren't in those tables — their own
-        // reference_number already holds the settled document number (CPL1086),
-        // so fall back to it there.
-        const noSilver = rawType === 'ACCRECPAYMENT' || rawType === 'ACCPAYPAYMENT'
-          || rawType === 'ACCRECCREDIT' || rawType === 'ACCPAYCREDIT';
-        docNumber = doc?.num || (noSilver ? (r.reference_number || '') : '');
+        // Anything not found there (payments, credit notes, and bills missing from
+        // the bills table) falls back to the ledger's own reference_number — the
+        // document number / Reference Xero shows. A manual journal's
+        // reference_number holds its narration, so it keeps no Num (as in Xero).
+        docNumber = doc?.num || (rawType === 'ManualJournal' ? '' : (r.reference_number || ''));
       } else if (/^\d+$/.test(String(docNumber)) && memoText.startsWith(docNumber)) {
         docNumber = '';
       }
@@ -316,6 +337,12 @@ router.get('/ledger', async (req, res) => {
         memo: r.transaction_details,
         account: r.account_name,
         debit, credit, balance: zbal,
+        // Original-currency detail (for exports / reconciliation); debit/credit
+        // above stay the base-currency figures the balance is built from.
+        currencyCode: r.currency_code || null,
+        exchangeRate: r.exchange_rate != null ? Number(r.exchange_rate) : null,
+        nativeDebit: round2(r.native_debit),
+        nativeCredit: round2(r.native_credit),
       };
     });
 

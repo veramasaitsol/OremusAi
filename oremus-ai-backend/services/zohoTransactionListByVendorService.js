@@ -168,7 +168,7 @@ async function buildTransactionListByVendor(userId, params = {}) {
   const scope = platform ? [userId, orgId, platform] : [userId, orgId];
   const [lines] = await pool.execute(
     `SELECT source_id, source_type, transaction_type, transaction_date,
-            account_name, debit, credit,
+            account_name, COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
             transaction_details, reference_number
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}

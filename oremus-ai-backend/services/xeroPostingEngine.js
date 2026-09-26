@@ -123,7 +123,7 @@ const posts = (kind, status) => POSTING_STATUS[kind].has(String(status || '').to
 // ── Account map + control-account resolution ────────────────────────────────
 async function loadAccounts(userId) {
   const [rows] = await pool.execute(
-    `SELECT xero_id, code, name, type, class FROM xero_accounts WHERE user_id = ?`,
+    `SELECT xero_id, code, name, type, class, reporting_code, currency_code FROM xero_accounts WHERE user_id = ?`,
     [userId]
   );
   const byCode = new Map();
@@ -137,6 +137,7 @@ async function loadAccounts(userId) {
       type:     a.type,
       group,
       typeCode: typeCodeFor(a.type, group),
+      currency: a.currency_code || null,
     };
     if (a.code)    byCode.set(String(a.code), rec);
     if (a.xero_id) byId.set(String(a.xero_id), rec);
@@ -164,13 +165,21 @@ async function loadAccounts(userId) {
   const outputTax = _outputTaxCandidate && /gst payable|sales tax/i.test(_outputTaxCandidate.name || '')
     ? null : _outputTaxCandidate;
   const rounding  = findByName(/rounding/i);
+  // Xero's system realised-FX account carries reporting code EXP.FOR.RGL in every
+  // org (its name is user-editable, so the name is only a fallback).
+  const byReportingCode = (rc) => {
+    const row = rows.find((a) => String(a.reporting_code || '').toUpperCase() === rc);
+    return row ? ((row.xero_id && byId.get(String(row.xero_id))) || (row.code && byCode.get(String(row.code))) || null) : null;
+  };
+  const realisedFx = byReportingCode('EXP.FOR.RGL') || findByName(/(^|[^n])reali[sz]ed\s+currency/i);
+  const unrealisedFx = byReportingCode('EXP.FOR.UGL') || findByName(/unreali[sz]ed\s+currency/i);
   // AR/AP are the receivable/payable control accounts regardless of their raw
   // Xero type (CURRENT/CURRLIAB) — pin the codes the aging/BS builders expect.
   if (ar) ar.typeCode = 'accounts_receivable';
   if (ap) ap.typeCode = 'accounts_payable';
   return {
     byCode, byId,
-    ar, ap, outputTax, inputTax, rounding,
+    ar, ap, outputTax, inputTax, rounding, realisedFx, unrealisedFx,
     // Synthetic account that absorbs invoice/bill cash settlement (AmountPaid)
     // because Xero won't disclose the paying bank account to a granular app.
     // Typed as a bank so cash reports (Bank/Exec Summary) include it.
@@ -314,7 +323,13 @@ function buildManualJournalLines(mj, accounts) {
     const acct = resolveAccount(accounts, li);
     const amt  = num(li.LineAmount);      // Xero: >=0 debit, <0 credit
     if (amt === 0) continue;
-    lines.push({ account: acct, debit: amt >= 0 ? amt : 0, credit: amt < 0 ? -amt : 0, taxType: li.TaxType, tax: num(li.TaxAmount) });
+    // Xero's Account Transactions shows each journal LINE's own description
+    // (falling back to the journal narration) — keep it per line.
+    const lineDesc = String(li.Description || '').trim();
+    lines.push({
+      account: acct, debit: amt >= 0 ? amt : 0, credit: amt < 0 ? -amt : 0,
+      taxType: li.TaxType, tax: num(li.TaxAmount), details: lineDesc || null,
+    });
   }
   return lines;
 }
@@ -327,7 +342,15 @@ function buildManualJournalLines(mj, accounts) {
 //   Customer payment (ACCRECPAYMENT): Dr Bank, Cr Clearing.
 //   Supplier payment (ACCPAYPAYMENT): Dr Clearing, Cr Bank.
 // Falls back to AR/AP only if the invoice pass never ran (no clearing account).
-function buildPaymentLines(p, accounts) {
+//
+// Realised FX: a foreign-currency document is relieved at ITS OWN rate (the
+// invoice pass posted Clearing at that rate) but the cash lands at the PAYMENT's
+// rate. Xero books the difference to its realised-FX account, so we do too: the
+// contra leg carries the invoice-rate base amount, the bank leg the base amount
+// Xero actually banked (p.BankAmount for a base-currency bank), and an FX line
+// the gap. Native debit/credit are unchanged (the FX line is base-only), so the
+// native-currency ledger checks are unaffected. `fx` = { docRate, homeCurrency }.
+function buildPaymentLines(p, accounts, fx = {}) {
   const amount = num(p.Amount);
   if (amount === 0) return [];
   const bank = resolveAccount(accounts, { AccountCode: p.Account?.Code, AccountID: p.Account?.AccountID });
@@ -339,19 +362,39 @@ function buildPaymentLines(p, accounts) {
   const isSpend   = type === 'ACCPAYPAYMENT' || (!type && invType === 'ACCPAY');
   const contra = accounts.clearing || (isReceive ? accounts.ar : accounts.ap);
   if (!contra) return [];
-  if (isReceive) {
-    return [
-      { account: bank,   debit: amount, credit: 0 },
-      { account: contra, debit: 0,      credit: amount },
-    ];
+  if (!isReceive && !isSpend) return [];
+
+  const bankLine   = { account: bank,   debit: isReceive ? amount : 0, credit: isReceive ? 0 : amount };
+  const contraLine = { account: contra, debit: isReceive ? 0 : amount, credit: isReceive ? amount : 0 };
+
+  const docRate = num(fx.docRate) > 0 ? num(fx.docRate) : 1;
+  const payRate = num(p.CurrencyRate) > 0 ? num(p.CurrencyRate) : docRate;
+  if ((docRate !== 1 || payRate !== 1) && accounts.realisedFx) {
+    const contraBase = r2(amount / docRate);
+    const bankIsBase = !bank.currency || !fx.homeCurrency || bank.currency === fx.homeCurrency;
+    const bankBase = bankIsBase && p.BankAmount != null && num(p.BankAmount) > 0
+      ? r2(num(p.BankAmount))
+      : r2(amount / payRate);
+    const setBase = (ln, base, rate) => {
+      ln.baseDebit = ln.debit ? base : 0;
+      ln.baseCredit = ln.credit ? base : 0;
+      ln.rate = rate;
+    };
+    setBase(contraLine, contraBase, docRate);
+    setBase(bankLine, bankBase, payRate);
+    // Expense-positive loss: a receipt banks less than the AR it relieves; a
+    // payment spends more than the AP it relieves.
+    const loss = r2(isReceive ? contraBase - bankBase : bankBase - contraBase);
+    const lines = isReceive ? [bankLine, contraLine] : [contraLine, bankLine];
+    if (loss !== 0) {
+      lines.push({
+        account: accounts.realisedFx, debit: 0, credit: 0,
+        baseDebit: loss > 0 ? loss : 0, baseCredit: loss < 0 ? -loss : 0, rate: 1,
+      });
+    }
+    return lines;
   }
-  if (isSpend) {
-    return [
-      { account: contra, debit: amount, credit: 0 },
-      { account: bank,   debit: 0,      credit: amount },
-    ];
-  }
-  return [];
+  return isReceive ? [bankLine, contraLine] : [contraLine, bankLine];
 }
 
 // Bank transfer — Dr destination bank, Cr source bank.
@@ -368,14 +411,19 @@ function buildBankTransferLines(bt, accounts) {
 
 // Balance a document's lines: force ΣDr == ΣCr by absorbing residual into the
 // document's control account (or a rounding account) so the ledger is airtight.
-function balance(lines, controlAcct) {
+// A sub-rupee residual (document Total vs Σ lines, e.g. Sodexo 53,012.00 vs
+// 53,011.99) is what Xero itself posts to its Rounding account, so it goes there
+// when `roundingAcct` is given; anything larger stays on the control account
+// where a genuine posting gap remains visible.
+function balance(lines, controlAcct, roundingAcct = null) {
   let dr = 0; let cr = 0;
   for (const l of lines) { dr += l.debit; cr += l.credit; }
   const residual = +(dr - cr).toFixed(2);
-  if (Math.abs(residual) >= 0.01 && controlAcct) {
+  const target = roundingAcct && Math.abs(residual) < 1 ? roundingAcct : controlAcct;
+  if (Math.abs(residual) >= 0.01 && target) {
     // residual > 0 → too much debit → add a credit to balance.
     lines.push({
-      account: controlAcct,
+      account: target,
       debit:  residual < 0 ? -residual : 0,
       credit: residual > 0 ?  residual : 0,
       _rounding: true,
@@ -385,14 +433,23 @@ function balance(lines, controlAcct) {
 }
 
 // ── Persist one document's balanced lines to the staging table ──────────────
-async function writeDoc(conn, { userId, orgId, sourceType, sourceId, date, ref, details, currency }, lines) {
+// `exchangeRate` is the document's OWN historical rate as Xero reports it
+// (Invoice/CreditNote/BankTransaction CurrencyRate) — never a live/looked-up
+// rate, so a re-sync months later still posts the same base-currency value.
+// A document type Xero never lets carry a foreign currency (ManualJournal,
+// BankTransfer) simply omits it, which defaults to 1 below — base amounts
+// equal the native ones, exactly as today.
+async function writeDoc(conn, { userId, orgId, sourceType, sourceId, date, ref, details, currency, exchangeRate, baseCurrency }, lines) {
   const txnId = `xero:${sourceId}`;
+  const rate = Number(exchangeRate) > 0 ? Number(exchangeRate) : 1;
   let i = 0;
   for (const ln of lines) {
     // account_id must be unique per (txn, transaction_number); we key
     // transaction_number on the line index and account_id on the real code so
     // reports can GROUP BY account_id/account_name meaningfully.
     const acctId = ln.account.id || ln.account.code || `${sourceId}:${i}`;
+    const debit = +ln.debit.toFixed(2);
+    const credit = +ln.credit.toFixed(2);
     // eslint-disable-next-line no-await-in-loop
     await conn.execute(
       `INSERT INTO account_transactions
@@ -400,8 +457,9 @@ async function writeDoc(conn, { userId, orgId, sourceType, sourceId, date, ref, 
           account_name, account_group, account_type_code, transaction_details,
           transaction_type, transaction_number, reference_number,
           debit, credit, balance, balance_type,
-          source_type, source_id, line_number, tax_type, tax_amount, currency_code, synced_at)
-       VALUES (?,?,'xero',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+          source_type, source_id, line_number, tax_type, tax_amount, currency_code,
+          exchange_rate, base_currency_code, base_debit, base_credit, synced_at)
+       VALUES (?,?,'xero',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
        ON DUPLICATE KEY UPDATE
          transaction_date=VALUES(transaction_date), account_name=VALUES(account_name),
          account_group=VALUES(account_group), account_type_code=VALUES(account_type_code),
@@ -411,17 +469,25 @@ async function writeDoc(conn, { userId, orgId, sourceType, sourceId, date, ref, 
          source_type=VALUES(source_type), source_id=VALUES(source_id), line_number=VALUES(line_number),
          tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount),
          currency_code=COALESCE(VALUES(currency_code), currency_code),
+         exchange_rate=VALUES(exchange_rate),
+         base_currency_code=COALESCE(VALUES(base_currency_code), base_currency_code),
+         base_debit=VALUES(base_debit), base_credit=VALUES(base_credit),
          synced_at=NOW()`,
       [
         userId, String(orgId), txnId, String(acctId), (ln._date || date),
         ln.account.name || null, ln.account.group || null, ln.account.typeCode || null,
-        details || null, sourceType, String(i), ref || null,
-        +ln.debit.toFixed(2), +ln.credit.toFixed(2),
+        ln.details || details || null, sourceType, String(i), ref || null,
+        debit, credit,
         +Math.abs(ln.debit - ln.credit).toFixed(2),
         ln.debit >= ln.credit ? 'D' : 'C',
         sourceType, String(sourceId), i,
         ln.taxType || null, ln.tax != null ? +Number(ln.tax).toFixed(2) : 0,
         currency || null,
+        // A line may carry its own base amounts (a payment's bank leg at the
+        // payment rate, a base-only realised-FX line); otherwise native ÷ doc rate.
+        ln.rate > 0 ? ln.rate : rate, baseCurrency || null,
+        ln.baseDebit != null ? +Number(ln.baseDebit).toFixed(2) : +(debit / rate).toFixed(2),
+        ln.baseCredit != null ? +Number(ln.baseCredit).toFixed(2) : +(credit / rate).toFixed(2),
       ]
     );
     i += 1;
@@ -503,12 +569,13 @@ async function buildStagingLedger(userId, opts = {}) {
       for (const inv of invs) {
         if (!posts('invoice', inv.Status)) continue; // skip DRAFT/SUBMITTED/VOIDED/DELETED
         const control = String(inv.Type).toUpperCase() === 'ACCREC' ? accounts.ar : accounts.ap;
-        const built = balance(buildInvoiceLines(inv, accounts), control);
+        const built = balance(buildInvoiceLines(inv, accounts), control, accounts.rounding);
         // eslint-disable-next-line no-await-in-loop
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: inv.Type, sourceId: inv.InvoiceID,
           date: toDate(inv.DateString || inv.Date), ref: inv.InvoiceNumber || inv.Reference,
           details: inv.Contact?.Name, currency: inv.CurrencyCode,
+          exchangeRate: inv.CurrencyRate, baseCurrency: homeCurrency,
         }, built);
       }
       stats.invoices = { docs: invs.length, lines };
@@ -520,12 +587,13 @@ async function buildStagingLedger(userId, opts = {}) {
         if (!posts('creditnote', cn.Status)) continue; // skip DRAFT/SUBMITTED/VOIDED/DELETED
         const isSalesCredit = String(cn.Type).toUpperCase() === 'ACCRECCREDIT';
         const control = isSalesCredit ? accounts.ar : accounts.ap;
-        const built = balance(buildCreditNoteLines(cn, accounts), control);
+        const built = balance(buildCreditNoteLines(cn, accounts), control, accounts.rounding);
         // eslint-disable-next-line no-await-in-loop
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: cn.Type, sourceId: cn.CreditNoteID,
           date: toDate(cn.DateString || cn.Date), ref: cn.CreditNoteNumber,
           details: cn.Contact?.Name, currency: cn.CurrencyCode,
+          exchangeRate: cn.CurrencyRate, baseCurrency: homeCurrency,
         }, built);
       }
       stats.creditnotes = { docs: cns.length, lines };
@@ -544,6 +612,7 @@ async function buildStagingLedger(userId, opts = {}) {
           userId, orgId, sourceType: `Bank${bt.Type}`, sourceId: bt.BankTransactionID,
           date: toDate(bt.DateString || bt.Date), ref: bt.Reference,
           details: bt.Contact?.Name, currency: bt.CurrencyCode,
+          exchangeRate: bt.CurrencyRate, baseCurrency: homeCurrency,
         }, built);
       }
       stats.banktransactions = { docs: bts.length, lines };
@@ -562,17 +631,23 @@ async function buildStagingLedger(userId, opts = {}) {
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: 'ManualJournal', sourceId: mj.ManualJournalID,
           date: toDate(mj.Date), ref: mj.Narration, details: mj.Narration,
-          currency: homeCurrency,
+          currency: homeCurrency, baseCurrency: homeCurrency,
         }, built);
       }
       stats.manualjournals = { docs: mjs.length, lines };
     }
 
     if (pays) {
+      // Xero's Payment object embeds only a minimal Invoice stub (CurrencyCode,
+      // no CurrencyRate) — the real rate lives on the full Invoice we already
+      // fetched above, so look it up from there instead of leaving it at the
+      // default 1 (which would under-report a foreign-currency settlement).
+      const invoiceRateById = new Map((invs || []).map((inv) => [inv.InvoiceID, inv.CurrencyRate]));
       let lines = 0; let posted = 0;
       for (const p of pays) {
         if (String(p.Status || '').toUpperCase() !== 'AUTHORISED') continue; // skip DELETED
-        const built = buildPaymentLines(p, accounts);
+        const docRate = p.Invoice?.CurrencyRate ?? invoiceRateById.get(p.Invoice?.InvoiceID);
+        const built = buildPaymentLines(p, accounts, { docRate, homeCurrency });
         if (!built.length) continue;
         posted += 1;
         // eslint-disable-next-line no-await-in-loop
@@ -584,6 +659,8 @@ async function buildStagingLedger(userId, opts = {}) {
           userId, orgId, sourceType: p.PaymentType || 'Payment', sourceId: p.PaymentID,
           date: toDate(p.Date), ref: p.Reference || p.Invoice?.InvoiceNumber,
           details: p.Invoice?.Contact?.Name, currency: p.Invoice?.CurrencyCode || homeCurrency,
+          exchangeRate: docRate,
+          baseCurrency: homeCurrency,
         }, built);
       }
       stats.payments = { docs: pays.length, posted, lines };
@@ -600,7 +677,7 @@ async function buildStagingLedger(userId, opts = {}) {
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: 'BankTransfer', sourceId: bt.BankTransferID,
           date: toDate(bt.Date), ref: bt.Reference, details: null,
-          currency: homeCurrency,
+          currency: homeCurrency, baseCurrency: homeCurrency,
         }, built);
       }
       stats.banktransfers = { docs: xfers.length, lines };
@@ -683,6 +760,176 @@ async function promoteLedger(userId, orgId) {
 // re-running never double-counts. Graceful: any token / rate-limit / scope
 // failure is caught and the sync still succeeds (just without the true-up).
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// ── Report-time figures Xero never journals to a synced document ─────────────
+// Two P&L amounts exist in Xero with no source document any endpoint available
+// to this app returns:
+//  • Unrealised FX — Xero revalues open foreign-currency balances at each
+//    period-end rate when a report runs; its P&L shows realised + unrealised as
+//    one "Foreign Currency Gains and Losses" line.
+//  • Bank-reconciliation adjustments — small differences booked to Rounding
+//    while reconciling a statement line; visible only via /Journals (not granted).
+// So we read Xero's own monthly P&L (standard layout, 12 months per call) and
+// post, per month, (Xero's figure − what our ledger already holds) — the
+// realised-FX account for FX, the Rounding account for Rounding. Each is a
+// base-only pair against Accounts Receivable (native 0); the Trial-Balance
+// true-up that runs next keeps the Balance Sheet exact. Months telescope, so any
+// month-aligned report period sums correctly.
+const ROUNDING_ADJ_LIMIT = 100; // a larger "rounding" gap means missing data, not rounding
+
+async function syncXeroMonthlyAdjustments(userId, orgId) {
+  const accounts = await loadAccounts(userId);
+  if (!accounts.ar || (!accounts.unrealisedFx && !accounts.rounding)) return { posted: 0, skipped: true };
+  let creds;
+  try { creds = await getValidXeroToken(userId); }
+  catch (e) { return { posted: 0, skipped: true }; }
+
+  const [[orgRow]] = await pool.execute(
+    'SELECT currency FROM xero_organizations WHERE user_id = ? AND tenant_id = ? LIMIT 1',
+    [userId, String(orgId)]
+  ).catch(() => [[null]]);
+  const homeCurrency = orgRow?.currency || null;
+
+  const [[span]] = await pool.execute(
+    `SELECT MIN(transaction_date) AS mind, MAX(transaction_date) AS maxd
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ? AND platform = 'xero' AND transaction_id LIKE 'xero:%'`,
+    [userId, String(orgId)]
+  );
+  if (!span?.mind || !span?.maxd) return { posted: 0, skipped: true };
+  const asOf = String(span.maxd).slice(0, 10);
+  const monthKey = (y, m) => `${y}-${String(m).padStart(2, '0')}`;
+  const [sy, sm] = String(span.mind).slice(0, 7).split('-').map(Number);
+  const [ey, em] = asOf.slice(0, 7).split('-').map(Number);
+  const MON = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+  const roundingId = accounts.rounding?.id ? String(accounts.rounding.id) : null;
+
+  // Xero's FX-group and Rounding totals per month, newest block first.
+  const fxByMonth = {};
+  const roundingByMonth = {};
+  let y = ey; let m = em;
+  while (y > sy || (y === sy && m >= sm)) {
+    const monthsLeft = (y - sy) * 12 + (m - sm);
+    const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    // Xero's earlier columns reuse the base period's end DAY, so a base ending on
+    // the 30th cuts every earlier 31-day month short. Only a 31-day base month can
+    // carry a 12-month block; any other month is fetched on its own.
+    const periods = last === 31 ? Math.min(11, monthsLeft) : 0;
+    let report;
+    try {
+      const res = await withRetry(() => axios.get(`${XERO_API_BASE}/Reports/ProfitAndLoss`, {
+        headers: headers(creds.accessToken, creds.tenantId),
+        // standardLayout: a client's custom report layout could rename or group
+        // these lines. Xero accepts periods 1..11 only; a single month omits both.
+        params: {
+          fromDate: `${monthKey(y, m)}-01`, toDate: `${monthKey(y, m)}-${last}`, standardLayout: true,
+          ...(periods > 0 ? { periods, timeframe: 'MONTH' } : {}),
+        },
+      }));
+      report = res.data?.Reports?.[0];
+    } catch (e) {
+      // Partial data would misstate a month — keep the previous run's rows.
+      console.warn('[Xero monthly adjustments] P&L fetch failed:', e.response?.status || e.message);
+      return { posted: 0, skipped: true };
+    }
+    const cols = (report?.Rows || []).find((r) => r.RowType === 'Header')?.Cells || [];
+    const dataRows = (report?.Rows || []).flatMap((s) => s.Rows || []);
+    const rowFor = (match) => dataRows.find((r) => (r.Cells?.[0]?.Attributes || []).some(match));
+    const fxRow = rowFor((a) => a.Value === 'FXGROUPID');
+    const rndRow = roundingId ? rowFor((a) => a.Id === 'account' && String(a.Value) === roundingId) : null;
+    cols.slice(1).forEach((c, i) => {
+      const [, mon, yy] = String(c.Value || '').split(' '); // "31 Mar 26"
+      if (!MON[mon]) return;
+      const k = monthKey(2000 + Number(yy), MON[mon]);
+      fxByMonth[k] = num(fxRow?.Cells?.[i + 1]?.Value);
+      roundingByMonth[k] = num(rndRow?.Cells?.[i + 1]?.Value);
+    });
+    m -= periods + 1;
+    while (m < 1) { m += 12; y -= 1; }
+  }
+
+  // What our own ledger (synced documents only) already holds per month.
+  const oursByMonth = async (accountId) => {
+    const out = {};
+    if (!accountId) return out;
+    const [rows] = await pool.execute(
+      `SELECT DATE_FORMAT(transaction_date, '%Y-%m') AS ym,
+              SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)) AS net
+         FROM account_transactions
+        WHERE user_id = ? AND org_id = ? AND platform = 'xero'
+          AND transaction_id LIKE 'xero:%' AND account_id = ?
+        GROUP BY ym`,
+      [userId, String(orgId), String(accountId)]
+    );
+    for (const r of rows) out[r.ym] = num(r.net);
+    return out;
+  };
+  const realisedByMonth = await oursByMonth(accounts.realisedFx?.id);
+  const ourRoundingByMonth = await oursByMonth(roundingId);
+
+  await pool.execute(
+    `DELETE FROM account_transactions
+      WHERE user_id = ? AND org_id = ? AND platform = 'xero'
+        AND (transaction_id LIKE 'xero-fxu:%' OR transaction_id LIKE 'xero-rnd:%')`,
+    [userId, String(orgId)]
+  );
+
+  const post = async ({ prefix, ym, amt, account, details, txnType, sourceType }) => {
+    const [yy, mm] = ym.split('-').map(Number);
+    const monthEnd = `${ym}-${String(new Date(Date.UTC(yy, mm, 0)).getUTCDate()).padStart(2, '0')}`;
+    const date = monthEnd < asOf ? monthEnd : asOf; // never past the ledger's last day (true-up as-at)
+    const lines = [
+      { account,         baseDebit: amt > 0 ? amt : 0,  baseCredit: amt < 0 ? -amt : 0 },
+      { account: accounts.ar, baseDebit: amt < 0 ? -amt : 0, baseCredit: amt > 0 ? amt : 0 },
+    ];
+    for (let i = 0; i < lines.length; i += 1) {
+      const ln = lines[i];
+      // eslint-disable-next-line no-await-in-loop
+      await pool.execute(
+        `INSERT INTO account_transactions
+           (user_id, org_id, platform, transaction_id, account_id, transaction_date,
+            account_name, account_group, account_type_code, transaction_details,
+            transaction_type, transaction_number, reference_number,
+            debit, credit, balance, balance_type, source_type, source_id, line_number, currency_code,
+            exchange_rate, base_currency_code, base_debit, base_credit, synced_at)
+         VALUES (?, ?, 'xero', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 0, 0, ?, ?, ?, ?, ?, 1, ?, ?, ?, NOW())`,
+        [userId, String(orgId), `${prefix}:${ym}`, String(ln.account.id || ln.account.code), date,
+         ln.account.name, ln.account.group, ln.account.typeCode, details, txnType, String(i),
+         ln.baseDebit >= ln.baseCredit ? 'D' : 'C', sourceType, ym, i, homeCurrency, homeCurrency,
+         ln.baseDebit, ln.baseCredit]
+      );
+    }
+  };
+
+  let posted = 0; let rounding = 0; const skippedRounding = [];
+  for (const ym of Object.keys(fxByMonth)) {
+    if (accounts.unrealisedFx) {
+      const amt = r2(fxByMonth[ym] - (realisedByMonth[ym] || 0)); // expense-positive
+      if (amt !== 0) {
+        // eslint-disable-next-line no-await-in-loop
+        await post({ prefix: 'xero-fxu', ym, amt, account: accounts.unrealisedFx,
+          details: 'Unrealised currency gains/losses (Xero revaluation)', txnType: 'Unrealised FX', sourceType: 'xero-fx-unrealised' });
+        posted += 1;
+      }
+    }
+    if (accounts.rounding) {
+      const amt = r2((roundingByMonth[ym] || 0) - (ourRoundingByMonth[ym] || 0));
+      if (amt !== 0 && Math.abs(amt) < ROUNDING_ADJ_LIMIT) {
+        // eslint-disable-next-line no-await-in-loop
+        await post({ prefix: 'xero-rnd', ym, amt, account: accounts.rounding,
+          details: 'Reconciliation adjustments (Xero, monthly total)', txnType: 'Adjustment', sourceType: 'xero-rounding-adjustment' });
+        rounding += 1;
+      } else if (amt !== 0) {
+        skippedRounding.push({ ym, amt });
+      }
+    }
+  }
+  if (skippedRounding.length) {
+    console.warn(`[Xero monthly adjustments] user=${userId} rounding gap too large to be reconciliation rounding — not posted:`, JSON.stringify(skippedRounding));
+  }
+  console.log(`[Xero monthly adjustments] user=${userId} org=${orgId}: unrealised FX ${posted} month(s), reconciliation adjustments ${rounding} month(s)`);
+  return { posted, rounding, skippedRounding };
+}
 
 async function trueUpFromTrialBalance(userId, orgId) {
   let creds;
@@ -773,9 +1020,12 @@ async function trueUpFromTrialBalance(userId, orgId) {
   );
 
   // Our current net per account, EXCLUDING prior true-up rows (keeps it stable).
+  // In BASE currency: Xero's TB is base-currency and every report reads
+  // COALESCE(base_*, native) + these plugs, so a native-currency net here would
+  // leave a foreign-currency account off by (base − native) on the BS/TB.
   const [ours] = await pool.execute(
     `SELECT account_id, account_name, account_group, account_type_code,
-            ROUND(SUM(debit) - SUM(credit), 2) AS net
+            ROUND(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)), 2) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ? AND platform = 'xero'
         AND transaction_id NOT LIKE 'xero-recon:%'
@@ -985,6 +1235,10 @@ async function verifyXeroLedger(userId, orgId, opts = {}) {
 async function rebuildXeroLedger(userId, opts = {}) {
   const build = await buildStagingLedger(userId, opts);
   const promoted = await promoteLedger(userId, build.orgId);
+  // Before the true-up, so its per-account plugs account for these rows.
+  let monthlyAdjustments = { posted: 0, skipped: true };
+  try { monthlyAdjustments = await syncXeroMonthlyAdjustments(userId, build.orgId); }
+  catch (e) { console.warn('[Xero monthly adjustments] skipped:', e.message); }
   // True-up bank/clearing/opening gaps against Xero's own Trial Balance so the
   // Balance Sheet + drill reconcile. Non-fatal: on any failure the sync stands.
   //
@@ -999,13 +1253,14 @@ async function rebuildXeroLedger(userId, opts = {}) {
   let verify = { ok: null, skipped: true };
   try { verify = await verifyXeroLedger(userId, build.orgId); }
   catch (e) { console.warn('[Xero verify] skipped:', e.message); }
-  return { ...build, promoted, trueup, verify };
+  return { ...build, promoted, monthlyAdjustments, trueup, verify };
 }
 
 module.exports = {
   buildStagingLedger,
   promoteLedger,
   rebuildXeroLedger,
+  syncXeroMonthlyAdjustments,
   trueUpFromTrialBalance,
   verifyXeroLedger,
   loadAccounts,

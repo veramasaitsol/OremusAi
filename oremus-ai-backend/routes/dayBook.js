@@ -118,8 +118,8 @@ router.get('/', async (req, res) => {
     // self-balancing voucher and must be counted/grouped separately to match Zoho.
     const [[summary]] = await pool.execute(
       `SELECT COUNT(DISTINCT at.transaction_id, at.transaction_number) AS total,
-              COALESCE(SUM(at.debit),  0)        AS periodDebit,
-              COALESCE(SUM(at.credit), 0)        AS periodCredit
+              COALESCE(SUM(COALESCE(at.base_debit, at.debit)),  0)        AS periodDebit,
+              COALESCE(SUM(COALESCE(at.base_credit, at.credit)), 0)        AS periodCredit
          FROM account_transactions at
         WHERE ${where}`,
       params
@@ -163,7 +163,8 @@ router.get('/', async (req, res) => {
         `SELECT at.transaction_id, at.transaction_date, at.account_name,
                 at.account_group, at.account_type_code, at.transaction_details,
                 at.transaction_type, at.transaction_number, at.reference_number,
-                at.debit, at.credit, at.currency_code
+                COALESCE(at.base_debit, at.debit) AS debit, COALESCE(at.base_credit, at.credit) AS credit,
+                COALESCE(at.base_currency_code, at.currency_code) AS currency_code
            FROM account_transactions at
           WHERE at.user_id = ?
             AND (at.transaction_id, at.transaction_number) IN (${pairPlaceholders})

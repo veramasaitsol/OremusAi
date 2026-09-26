@@ -23,6 +23,16 @@ import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
 import DrillDownModal from './DrillDownModal.jsx';
+import { breakdownToSheet, exportSheetsXLSX } from '../../utils/exportReport.js';
+
+const DRILL_COLUMNS = [
+  { key: 'date',    label: 'Date',      align: 'left' },
+  { key: 'ref',     label: 'Reference', align: 'left' },
+  { key: 'name',    label: 'Name',      align: 'left' },
+  { key: 'account', label: 'Account',   align: 'left' },
+  { key: 'source',  label: 'Source',    align: 'left' },
+  { key: 'amount',  label: 'Amount',    align: 'right' },
+];
 
 const XERO_BLUE = '#1A73E8';
 
@@ -170,8 +180,33 @@ export default function ExecutiveSummaryViewer() {
       rows: b.rows || [],
       count: b.count || 0,
       truncated: !!b.truncated,
+      reportFigure: r.cells?.[colKey],
+      divisor: b.divisor,
+      divisorLabel: b.divisorLabel,
     });
   };
+
+  // Every breakdown on the report (each row × each period column) in one
+  // workbook, one sheet per figure, each ending in its reconciliation footer.
+  const exportAllBreakdowns = () => {
+    const periodCols = valueCols.filter((c) => !c.variance);
+    const sheets = [];
+    for (const r of rows) {
+      for (const c of periodCols) {
+        const b = r.breakdowns?.[c.key];
+        if (!b?.rows?.length) continue;
+        sheets.push(breakdownToSheet({
+          name: periodCols.length > 1 ? `${r.label} ${c.label}` : r.label,
+          title: `${r.label} — ${c.label}`,
+          subtitle: `${client?.name || ''} ${fromVal || ''} to ${toVal || ''}`.trim(),
+          rows: b.rows, divisor: b.divisor, divisorLabel: b.divisorLabel,
+          reportFigure: r.cells?.[c.key], currency: data?.currency,
+        }));
+      }
+    }
+    exportSheetsXLSX(sheets, `${report.name} breakdowns`);
+  };
+  const hasBreakdowns = rows.some((r) => r.breakdowns && Object.keys(r.breakdowns).length);
 
   // Catalog of indicators grouped by their section header, derived from the data
   // so the Filter picker always mirrors exactly what the report can show.
@@ -236,6 +271,16 @@ export default function ExecutiveSummaryViewer() {
           </h2>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {hasBreakdowns && !loading && (
+            <button
+              type="button"
+              onClick={exportAllBreakdowns}
+              title="Every breakdown behind the report, one Excel sheet per figure"
+              className="h-8 px-2.5 rounded-md border border-navy-200 dark:border-navy-700 text-navy-700 dark:text-navy-200 hover:bg-navy-50 dark:hover:bg-navy-800 inline-flex items-center gap-1 text-[12.5px] font-semibold"
+            >
+              Export breakdowns
+            </button>
+          )}
           <ExportMenu
             meta={{ company: client?.name, from: fromVal, to: toVal }}
             trigger={(
@@ -544,6 +589,13 @@ export default function ExecutiveSummaryViewer() {
         rows={drill?.rows || []}
         count={drill?.count || 0}
         currency={sym}
+        columns={DRILL_COLUMNS}
+        signed
+        exportName={drill ? `${report.name} - ${drill.title} ${drill.subtitle || ''}`.trim() : undefined}
+        currencyCode={data?.currency}
+        reportFigure={drill?.reportFigure}
+        divisor={drill?.divisor}
+        divisorLabel={drill?.divisorLabel}
       />
     </>
   );

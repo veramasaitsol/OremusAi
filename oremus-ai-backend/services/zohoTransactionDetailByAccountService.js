@@ -152,7 +152,7 @@ async function buildTransactionDetailByAccount(userId, params = {}) {
     `SELECT id, platform, account_id, account_name, account_group,
             transaction_id, transaction_date, transaction_type, source_type,
             transaction_number, reference_number, transaction_details,
-            source_id, debit, credit
+            source_id, COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date BETWEEN ? AND ?
