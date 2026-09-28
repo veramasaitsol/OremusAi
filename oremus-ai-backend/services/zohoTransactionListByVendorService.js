@@ -154,6 +154,107 @@ async function trackedContractors(userId, orgId) {
   return new Set(rows.map((r) => String(r.contact_name).trim().toLowerCase()));
 }
 
+// ── QuickBooks Online ────────────────────────────────────────────────────────
+// QBO syncs its ledger from the GeneralLedger report, which has no bill-payment,
+// vendor-credit or journal sub-ledger — and `transaction_details` there holds
+// the report's Name column OR, when that is blank, the line's memo. So QBO
+// rows follow QuickBooks' own "Transaction List by Vendor" conventions:
+//  • Bill / Bill Payment / Vendor Credit / Journal Entry = documents that post to
+//    Accounts Payable; amount = their A/P movement (bill +, payment/credit −).
+//  • Journal Entry amount is 0.00 — QuickBooks prints journals at zero here.
+//  • Expense = a direct purchase with a payee (expense_entries.vendor_name);
+//    amount = −(its expense-account legs), so the bank/card leg never cancels it.
+//  • Vendor = the bill's own vendor, else the A/P line's Name only when it is a
+//    real synced vendor — a memo is never shown as a vendor ("Unknown Vendor").
+async function isQuickBooksOrg(orgId, platform) {
+  if (platform) return platform === 'quickbooks';
+  const [[r]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
+    .catch(() => [[null]]);
+  return !!r;
+}
+
+const UNKNOWN_VENDOR = 'Unknown Vendor';
+
+async function qboVendorNames(userId, orgId) {
+  const [rows] = await pool.execute(
+    `SELECT contact_name, company_name, full_name FROM vendors
+      WHERE user_id = ? AND org_id = ? AND COALESCE(is_deleted, 0) = 0`,
+    [userId, orgId]
+  );
+  const byKey = new Map();
+  for (const r of rows) {
+    const display = String(r.contact_name || r.company_name || r.full_name || '').trim();
+    if (!display) continue;
+    for (const n of [r.contact_name, r.company_name, r.full_name]) {
+      const k = String(n || '').trim().toLowerCase();
+      if (k && !byKey.has(k)) byKey.set(k, display);
+    }
+  }
+  return byKey;
+}
+
+async function qboEntries(userId, orgId, from, to, byDoc, docs) {
+  const vendors = await qboVendorNames(userId, orgId);
+  const out = [];
+  for (const [key, d] of byDoc) {
+    if (!d.payableAccount) continue;
+    const doc = docs.get(key);
+    const typeKey = String(d.type || '').toLowerCase();
+    const isJournal = typeKey === 'journal entry';
+    const vendor = doc?.vendor
+      || vendors.get(String(d.apName || '').trim().toLowerCase())
+      || UNKNOWN_VENDOR;
+    const splits = [...d.splits].filter(Boolean);
+    out.push({
+      vendor,
+      date: d.date,
+      type: txnTypeLabel(d.type),
+      num: doc?.num || d.ref || '',
+      memo: doc?.memo || (d.apName && !vendors.has(String(d.apName).trim().toLowerCase()) ? d.apName : ''),
+      account: d.payableAccount,
+      split: splits.length === 1 ? splits[0] : '',
+      amount: isJournal ? 0 : r2(d.payable),
+    });
+  }
+
+  // Direct expenses with a payee — header from expense_entries, USD amount from
+  // the ledger's expense legs (bank / card / A/P legs excluded).
+  const [exp] = await pool.execute(
+    `SELECT e.vendor_name, e.reference_number, e.description, at.source_id,
+            MIN(at.transaction_date) AS dt,
+            SUM(CASE WHEN at.account_type_code NOT IN ('bank', 'credit_card', 'accounts_payable')
+                     THEN at.debit - at.credit ELSE 0 END) AS expense_amt,
+            MAX(CASE WHEN at.account_type_code IN ('bank', 'credit_card') THEN at.account_name END) AS paid_from,
+            GROUP_CONCAT(DISTINCT CASE WHEN at.account_type_code NOT IN ('bank', 'credit_card', 'accounts_payable')
+                         THEN at.account_name END SEPARATOR '||') AS expense_accounts
+       FROM account_transactions at
+       JOIN expense_entries e
+         ON e.user_id = at.user_id
+        AND e.org_id COLLATE utf8mb4_unicode_ci = at.org_id COLLATE utf8mb4_unicode_ci
+        AND e.qbo_id COLLATE utf8mb4_unicode_ci = at.source_id COLLATE utf8mb4_unicode_ci
+        AND COALESCE(e.is_deleted, 0) = 0
+        AND COALESCE(e.vendor_name, '') <> ''
+      WHERE at.user_id = ? AND at.org_id = ? AND at.source_type = 'Expense'
+        AND at.transaction_date BETWEEN ? AND ?
+      GROUP BY e.vendor_name, e.reference_number, e.description, at.source_id`,
+    [userId, orgId, from, `${to} 23:59:59`]
+  );
+  for (const x of exp) {
+    const accts = String(x.expense_accounts || '').split('||').filter(Boolean);
+    out.push({
+      vendor: String(x.vendor_name).trim(),
+      date: x.dt,
+      type: 'Expense',
+      num: String(x.reference_number || '').trim(),
+      memo: String(x.description || '').trim(),
+      account: x.paid_from || '',
+      split: accts.length === 1 ? accts[0] : '',
+      amount: -r2(x.expense_amt),
+    });
+  }
+  return out;
+}
+
 async function buildTransactionListByVendor(userId, params = {}) {
   const orgId = await resolveOrgId(userId, params);
   if (!orgId) {
@@ -203,6 +304,7 @@ async function buildTransactionListByVendor(userId, params = {}) {
     if (isPayable(name)) {
       d.payableAccount = name;
       d.payable += num(l.credit) - num(l.debit);
+      if (!d.apName) d.apName = String(l.transaction_details || '').trim();
     } else {
       d.splits.add(name);
     }
@@ -210,7 +312,9 @@ async function buildTransactionListByVendor(userId, params = {}) {
   }
 
   const entries = [];
-  for (const [key, d] of byDoc) {
+  if (await isQuickBooksOrg(orgId, platform)) {
+    entries.push(...(await qboEntries(userId, orgId, from, to, byDoc, docs)));
+  } else for (const [key, d] of byDoc) {
     // Only what passed through Accounts Payable is a vendor's transaction.
     if (!d.payableAccount) continue;
     const doc = docs.get(key);
