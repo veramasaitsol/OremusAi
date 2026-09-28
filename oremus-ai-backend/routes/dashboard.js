@@ -276,13 +276,13 @@ async function resolveCashOnHand(av, uid, activeOrgId, asOf) {
     const rows = await safeQuery(
       `SELECT account_id AS id,
               MAX(account_name) AS name,
-              SUM(debit - credit) AS net
+              SUM(COALESCE(base_debit, debit) - COALESCE(base_credit, credit)) AS net
          FROM account_transactions
         WHERE user_id=?${activeOrgId ? ' AND org_id = ?' : ''}
           AND LOWER(COALESCE(account_type_code, '')) IN ('bank', 'cash')
           AND COALESCE(transaction_type, '') <> 'AccountBalance'${asOfF}
         GROUP BY account_id
-       HAVING ROUND(COALESCE(SUM(debit - credit), 0), 2) <> 0
+       HAVING ROUND(COALESCE(SUM(COALESCE(base_debit, debit) - COALESCE(base_credit, credit)), 0), 2) <> 0
        ORDER BY name ASC`,
       [userId, ...orgP, ...asOfP]
     );
@@ -623,16 +623,16 @@ router.get('/', async (req, res) => {
       } catch (_) {
         // Fallback: if computePLFigures fails (no org_id), use legacy gross sums
         const [revRow] = await safeQuery(
-          `SELECT COALESCE(SUM(credit), 0) AS v FROM account_transactions
+          `SELECT COALESCE(SUM(COALESCE(base_credit, credit)), 0) AS v FROM account_transactions
            WHERE user_id = ? AND account_group = 'income'
              AND (account_type_code IS NULL OR account_type_code <> 'other_income')
-             AND credit > 0
+             AND COALESCE(base_credit, credit) > 0
              AND transaction_date BETWEEN ? AND ?${orgF}`, [uid, from, to, ...orgP]
         );
         totalRevenue = parseFloat(revRow?.v || 0);
         const [expRow] = await safeQuery(
-          `SELECT COALESCE(SUM(debit), 0) AS v FROM account_transactions
-           WHERE user_id = ? AND account_group = 'expense' AND debit > 0
+          `SELECT COALESCE(SUM(COALESCE(base_debit, debit)), 0) AS v FROM account_transactions
+           WHERE user_id = ? AND account_group = 'expense' AND COALESCE(base_debit, debit) > 0
              AND transaction_date BETWEEN ? AND ?${orgF}`, [uid, from, to, ...orgP]
         );
         totalExpenses = parseFloat(expRow?.v || 0);
@@ -913,7 +913,7 @@ router.get('/revenue-trend', async (req, res) => {
       rows = await safeQuery(
         `SELECT DATE_FORMAT(transaction_date,'%Y-%m') AS month,
                 COALESCE(SUM(CASE WHEN account_type_code = 'other_income' THEN 0
-                    ELSE credit - debit END), 0) AS revenue
+                    ELSE COALESCE(base_credit, credit) - COALESCE(base_debit, debit) END), 0) AS revenue
          FROM account_transactions
          WHERE user_id = ? AND account_group = 'income'
            AND transaction_date BETWEEN ? AND ?${orgF}
@@ -980,7 +980,7 @@ router.get('/expense-trend', async (req, res) => {
       // Old approach summed only gross debits which overstated expenses.
       rows = await safeQuery(
         `SELECT DATE_FORMAT(transaction_date,'%Y-%m') AS month,
-                COALESCE(SUM(debit - credit), 0) AS expenses
+                COALESCE(SUM(COALESCE(base_debit, debit) - COALESCE(base_credit, credit)), 0) AS expenses
          FROM account_transactions
          WHERE user_id = ? AND account_group = 'expense'
            AND transaction_date BETWEEN ? AND ?${orgF}
@@ -1055,8 +1055,8 @@ router.get('/cashflow-trend', async (req, res) => {
     if (rows.length === 0 && hasAcctTxn) {
       rows = await safeQuery(
         `SELECT DATE_FORMAT(transaction_date,'%Y-%m') AS month,
-                COALESCE(SUM(CASE WHEN account_group = 'income'  AND credit > 0 THEN credit ELSE 0 END), 0) AS inflow,
-                COALESCE(SUM(CASE WHEN account_group = 'expense' AND debit  > 0 THEN debit  ELSE 0 END), 0) AS outflow
+                COALESCE(SUM(CASE WHEN account_group = 'income'  AND COALESCE(base_credit, credit) > 0 THEN COALESCE(base_credit, credit) ELSE 0 END), 0) AS inflow,
+                COALESCE(SUM(CASE WHEN account_group = 'expense' AND COALESCE(base_debit, debit) > 0 THEN COALESCE(base_debit, debit)  ELSE 0 END), 0) AS outflow
          FROM account_transactions
          WHERE user_id = ? AND transaction_date BETWEEN ? AND ?${orgF}
          GROUP BY month ORDER BY month ASC`, [uid, from, to, ...orgP]
@@ -1163,11 +1163,11 @@ router.get('/top-customers', async (req, res) => {
       rows = await safeQuery(
         `SELECT COALESCE(NULLIF(transaction_details,''), 'Unknown') AS customer_name,
                 COUNT(DISTINCT transaction_id) AS invoiceCount,
-                COALESCE(SUM(credit), 0) AS totalRevenue
+                COALESCE(SUM(COALESCE(base_credit, credit)), 0) AS totalRevenue
          FROM account_transactions
          WHERE user_id = ? AND account_group = 'income'
            AND (account_type_code IS NULL OR account_type_code <> 'other_income')
-           AND credit > 0
+           AND COALESCE(base_credit, credit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}
          GROUP BY customer_name
          ORDER BY totalRevenue DESC LIMIT ${limit}`, [uid, from, to, ...orgP]
@@ -1229,9 +1229,9 @@ router.get('/top-vendors', async (req, res) => {
       rows = await safeQuery(
         `SELECT COALESCE(NULLIF(transaction_details,''), 'Unknown') AS vendor_name,
                 COUNT(DISTINCT transaction_id) AS billCount,
-                COALESCE(SUM(debit), 0) AS totalAmount
+                COALESCE(SUM(COALESCE(base_debit, debit)), 0) AS totalAmount
          FROM account_transactions
-         WHERE user_id = ? AND account_group = 'expense' AND debit > 0
+         WHERE user_id = ? AND account_group = 'expense' AND COALESCE(base_debit, debit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}
          GROUP BY vendor_name
          ORDER BY totalAmount DESC LIMIT ${limit}`, [uid, from, to, ...orgP]
@@ -1482,13 +1482,13 @@ router.get('/profitability', async (req, res) => {
       // there's no Zoho API call and no live-token dependency. revenue − expenses
       // === Net Profit/Loss, matching the Reports page.
       const [revRow] = await safeQuery(
-        `SELECT COALESCE(SUM(credit),0) AS v FROM account_transactions
-         WHERE user_id=? AND account_group='income' AND credit>0
+        `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) AS v FROM account_transactions
+         WHERE user_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}`, [zbUid, from, to, ...orgP]
       );
       const [expRow] = await safeQuery(
-        `SELECT COALESCE(SUM(debit),0) AS v FROM account_transactions
-         WHERE user_id=? AND account_group='expense' AND debit>0
+        `SELECT COALESCE(SUM(COALESCE(base_debit, debit)),0) AS v FROM account_transactions
+         WHERE user_id=? AND account_group='expense' AND COALESCE(base_debit, debit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}`, [zbUid, from, to, ...orgP]
       );
       revenue  = Math.round(parseFloat(revRow?.v || 0));
@@ -1530,8 +1530,8 @@ router.get('/profitability', async (req, res) => {
       expenses = Math.round(parseFloat(r2?.v || 0));
     } else {
       const [revRow] = await safeQuery(
-        `SELECT COALESCE(SUM(credit),0) AS v FROM account_transactions
-         WHERE user_id=? AND account_group='income' AND credit>0
+        `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) AS v FROM account_transactions
+         WHERE user_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}`, [uid, from, to, ...orgP]
       );
       revenue  = Math.round(parseFloat(revRow?.v || 0));
@@ -1607,8 +1607,8 @@ router.get('/profitability', async (req, res) => {
         )
       : await safeQuery(
           `SELECT DATE_FORMAT(transaction_date,'%Y-%m') AS ym,
-                  COALESCE(SUM(CASE WHEN account_group='income'  AND credit>0 THEN credit ELSE 0 END),0) AS rev,
-                  COALESCE(SUM(CASE WHEN account_group='expense' AND debit>0  THEN debit  ELSE 0 END),0) AS exp
+                  COALESCE(SUM(CASE WHEN account_group='income'  AND COALESCE(base_credit, credit) > 0 THEN COALESCE(base_credit, credit) ELSE 0 END),0) AS rev,
+                  COALESCE(SUM(CASE WHEN account_group='expense' AND COALESCE(base_debit, debit) > 0  THEN COALESCE(base_debit, debit)  ELSE 0 END),0) AS exp
            FROM account_transactions
            WHERE user_id=? AND transaction_date BETWEEN ? AND ?${orgF}
            GROUP BY ym ORDER BY ym ASC`, [uid, from, to, ...orgP]
@@ -1699,13 +1699,13 @@ router.get('/efficiency', async (req, res) => {
     const periodDays = Math.max(1, (new Date(to) - new Date(from)) / 86400000);
 
     const [revRow]  = await safeQuery(
-      `SELECT COALESCE(SUM(credit),0) AS v FROM account_transactions
-       WHERE user_id=? AND account_group='income' AND credit>0
+      `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) AS v FROM account_transactions
+       WHERE user_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
          AND transaction_date BETWEEN ? AND ?${orgF}`, [uid, from, to, ...orgP]
     );
     const [expRow]  = await safeQuery(
-      `SELECT COALESCE(SUM(debit),0) AS v FROM account_transactions
-       WHERE user_id=? AND account_group='expense' AND debit>0
+      `SELECT COALESCE(SUM(COALESCE(base_debit, debit)),0) AS v FROM account_transactions
+       WHERE user_id=? AND account_group='expense' AND COALESCE(base_debit, debit) > 0
          AND transaction_date BETWEEN ? AND ?${orgF}`, [uid, from, to, ...orgP]
     );
     const [arRow]   = await safeQuery(`SELECT COALESCE(SUM(balance),0) AS v FROM invoices WHERE user_id=? AND balance>0${orgF}`, [invUid, ...orgP]);
@@ -1730,16 +1730,16 @@ router.get('/efficiency', async (req, res) => {
 
     // For AR/AP days use all-time data scaled to annual to avoid absurd values on short periods
     const [allTimeRev] = await safeQuery(
-      `SELECT COALESCE(SUM(credit),0) AS v,
+      `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) AS v,
               DATEDIFF(MAX(transaction_date), MIN(transaction_date))+1 AS span_days
        FROM account_transactions
-       WHERE user_id=? AND account_group='income' AND credit>0${orgF}`, [uid, ...orgP]
+       WHERE user_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0${orgF}`, [uid, ...orgP]
     );
     const [allTimeExp] = await safeQuery(
-      `SELECT COALESCE(SUM(debit),0) AS v,
+      `SELECT COALESCE(SUM(COALESCE(base_debit, debit)),0) AS v,
               DATEDIFF(MAX(transaction_date), MIN(transaction_date))+1 AS span_days
        FROM account_transactions
-       WHERE user_id=? AND account_group='expense' AND debit>0${orgF}`, [uid, ...orgP]
+       WHERE user_id=? AND account_group='expense' AND COALESCE(base_debit, debit) > 0${orgF}`, [uid, ...orgP]
     );
     const allRevSpan = Math.max(1, parseFloat(allTimeRev?.span_days || 365));
     const allExpSpan = Math.max(1, parseFloat(allTimeExp?.span_days || 365));
@@ -1995,9 +1995,9 @@ router.get('/kpi/revenue', async (req, res) => {
     } else {
       // ── Non-Zoho path: use account_transactions ───────────────────────────
       const trendRows = await safeQuery(
-        `SELECT DATE_FORMAT(transaction_date,'%Y-%m') AS ym, COALESCE(SUM(credit),0) AS revenue
+        `SELECT DATE_FORMAT(transaction_date,'%Y-%m') AS ym, COALESCE(SUM(COALESCE(base_credit, credit)),0) AS revenue
          FROM account_transactions
-         WHERE user_id=? AND account_group='income' AND credit>0
+         WHERE user_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}
          GROUP BY ym ORDER BY ym ASC`, [uid, from, to, ...orgP]
       );
@@ -2014,13 +2014,13 @@ router.get('/kpi/revenue', async (req, res) => {
       topCustomers = topCustRows.map(r => ({ name: r.name, amount: Math.round(parseFloat(r.amount)), count: parseInt(r.count) }));
 
       const [curRow] = await safeQuery(
-        `SELECT COALESCE(SUM(credit),0) AS v FROM account_transactions
-         WHERE user_id=? AND account_group='income' AND credit>0
+        `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) AS v FROM account_transactions
+         WHERE user_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}`, [uid, from, to, ...orgP]
       );
       const [priRow] = await safeQuery(
-        `SELECT COALESCE(SUM(credit),0) AS v FROM account_transactions
-         WHERE user_id=? AND account_group='income' AND credit>0
+        `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) AS v FROM account_transactions
+         WHERE user_id=? AND account_group='income' AND COALESCE(base_credit, credit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}`, [uid, priorFromStr, priorToStr, ...orgP]
       );
       current = Math.round(parseFloat(curRow?.v || 0));
@@ -2185,17 +2185,17 @@ router.get('/kpi/burn', async (req, res) => {
     } else {
       trendRows = await safeQuery(
         `SELECT DATE_FORMAT(transaction_date,'%Y-%m') AS ym,
-                COALESCE(SUM(debit),0) AS expenses
+                COALESCE(SUM(COALESCE(base_debit, debit)),0) AS expenses
          FROM account_transactions
-         WHERE user_id=? AND account_group='expense' AND debit>0
+         WHERE user_id=? AND account_group='expense' AND COALESCE(base_debit, debit) > 0
            AND transaction_date BETWEEN ? AND ?${orgF}
          GROUP BY ym ORDER BY ym ASC`, [uid, from, to, ...orgP]
       );
       topCatRows = await safeQuery(
         `SELECT COALESCE(account_name,'Other') AS name,
-                COALESCE(SUM(debit),0) AS amount
+                COALESCE(SUM(COALESCE(base_debit, debit)),0) AS amount
          FROM account_transactions
-         WHERE user_id=? AND account_group='expense' AND debit>0${orgF}
+         WHERE user_id=? AND account_group='expense' AND COALESCE(base_debit, debit) > 0${orgF}
          GROUP BY account_name ORDER BY amount DESC LIMIT 6`, [uid, ...orgP]
       );
     }

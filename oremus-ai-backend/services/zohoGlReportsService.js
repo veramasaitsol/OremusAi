@@ -310,13 +310,13 @@ async function buildTrialBalance(userId, params = {}) {
             SUM(CASE WHEN transaction_date IS NULL
                           OR transaction_date ${inverted ? '<=' : '<'} ?
                           OR transaction_id LIKE 'xero-recon:%'
-                     THEN debit - credit ELSE 0 END) AS opening_raw,
+                     THEN COALESCE(base_debit, debit) - COALESCE(base_credit, credit) ELSE 0 END) AS opening_raw,
             SUM(CASE WHEN transaction_date BETWEEN ? AND ?
                       AND transaction_id NOT LIKE 'xero-recon:%'
-                     THEN debit  ELSE 0 END) AS d,
+                     THEN COALESCE(base_debit, debit)  ELSE 0 END) AS d,
             SUM(CASE WHEN transaction_date BETWEEN ? AND ?
                       AND transaction_id NOT LIKE 'xero-recon:%'
-                     THEN credit ELSE 0 END) AS c
+                     THEN COALESCE(base_credit, credit) ELSE 0 END) AS c
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND account_group IN ('income', 'expense')
@@ -484,10 +484,10 @@ async function aggregateBS(userId, orgId, platform, asOf, earningsFrom = null, f
     `SELECT account_id,
             MAX(account_name) AS account_name,
             account_group, account_type_code,
-            SUM(debit)  AS d,
-            SUM(credit) AS c,
-            SUM(CASE WHEN transaction_date < ? THEN debit  ELSE 0 END) AS d_prior,
-            SUM(CASE WHEN transaction_date < ? THEN credit ELSE 0 END) AS c_prior
+            SUM(COALESCE(base_debit, debit))  AS d,
+            SUM(COALESCE(base_credit, credit)) AS c,
+            SUM(CASE WHEN transaction_date < ? THEN COALESCE(base_debit, debit)  ELSE 0 END) AS d_prior,
+            SUM(CASE WHEN transaction_date < ? THEN COALESCE(base_credit, credit) ELSE 0 END) AS c_prior
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND (transaction_date <= ?
@@ -1054,7 +1054,7 @@ async function buildGeneralLedger(userId, params = {}) {
     `SELECT id, platform, account_id, account_name, account_group,
             transaction_id, transaction_date, transaction_type, source_type,
             transaction_number, reference_number, transaction_details,
-            source_id, debit, credit
+            source_id, COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date BETWEEN ? AND ?
@@ -1064,7 +1064,7 @@ async function buildGeneralLedger(userId, params = {}) {
 
   // Opening balance per account: everything posted before the period starts.
   const [opening] = await pool.execute(
-    `SELECT account_id, SUM(debit) - SUM(credit) AS net
+    `SELECT account_id, SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date < ?

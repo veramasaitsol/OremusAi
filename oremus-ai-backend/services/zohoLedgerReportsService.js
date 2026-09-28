@@ -267,8 +267,8 @@ async function aggregatePL(userId, orgId, platform, from, to, currencyCode = nul
   if (currencyCode) args.push(currencyCode);
   const [accts] = await pool.execute(
     `SELECT account_id, account_name, account_group, account_type_code,
-            SUM(debit)  AS d,
-            SUM(credit) AS c
+            SUM(COALESCE(base_debit, debit))  AS d,
+            SUM(COALESCE(base_credit, credit)) AS c
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date BETWEEN ? AND ?
@@ -477,7 +477,7 @@ async function aggregateIndirectCashFlow(userId, orgId, platform, from, to) {
   // Exclude xero-recon:% true-up entries (same as P&L) so cash flow ties out.
   const [rows] = await pool.execute(
     `SELECT account_id, account_name, account_group AS g, account_type_code AS tc,
-            SUM(credit - debit) AS adj
+            SUM(COALESCE(base_credit, credit) - COALESCE(base_debit, debit)) AS adj
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?
@@ -485,7 +485,7 @@ async function aggregateIndirectCashFlow(userId, orgId, platform, from, to) {
         AND (account_type_code IS NULL OR account_type_code NOT IN ('bank', 'cash'))
         AND transaction_id NOT LIKE 'xero-recon:%'
       GROUP BY account_id, account_name, account_group, account_type_code
-      HAVING SUM(debit) + SUM(credit) <> 0
+      HAVING SUM(COALESCE(base_debit, debit)) + SUM(COALESCE(base_credit, credit)) <> 0
       ORDER BY account_name ASC`,
     args
   );
@@ -507,7 +507,7 @@ async function aggregateIndirectCashFlow(userId, orgId, platform, from, to) {
 // No platform filter — rows may have platform=NULL.
 async function openingCash(userId, orgId, platform, from) {
   const [[row]] = await pool.execute(
-    `SELECT SUM(debit - credit) AS bal
+    `SELECT SUM(COALESCE(base_debit, debit) - COALESCE(base_credit, credit)) AS bal
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND account_type_code IN ('bank', 'cash')
@@ -655,7 +655,7 @@ async function buildExpenseDetails(userId, params = {}) {
   const args = platform ? [userId, orgId, platform, from, to] : [userId, orgId, from, to];
   const [accts] = await pool.execute(
     `SELECT account_id, account_name,
-            SUM(debit) - SUM(credit) AS net
+            SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?${platClause}
         AND transaction_date BETWEEN ? AND ?

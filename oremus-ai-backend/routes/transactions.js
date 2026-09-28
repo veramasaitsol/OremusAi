@@ -244,7 +244,8 @@ router.get('/account-transactions', async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT id, transaction_id, account_id, transaction_date, account_name,
               transaction_details, transaction_type, transaction_number,
-              reference_number, debit, credit, balance, balance_type, synced_at
+              reference_number, COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
+              balance, balance_type, synced_at
        FROM account_transactions
        WHERE ${where}
        ORDER BY transaction_date DESC, id DESC
@@ -257,7 +258,7 @@ router.get('/account-transactions', async (req, res) => {
     );
 
     const [[{ totalDebit, totalCredit }]] = await pool.execute(
-      `SELECT COALESCE(SUM(debit),0) AS totalDebit, COALESCE(SUM(credit),0) AS totalCredit
+      `SELECT COALESCE(SUM(COALESCE(base_debit, debit)),0) AS totalDebit, COALESCE(SUM(COALESCE(base_credit, credit)),0) AS totalCredit
        FROM account_transactions WHERE ${where}`,
       params
     );

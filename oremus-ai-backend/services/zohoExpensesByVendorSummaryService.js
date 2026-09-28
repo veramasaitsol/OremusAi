@@ -95,13 +95,28 @@ function resolveRange(params) {
   return { from: from || _fy.from, to: to || _fy.to };
 }
 
-// Sum a per-vendor amount from one source table into the running map.
-async function accumulate(map, sql, args, sign) {
+const ymd = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ? String(d).slice(0, 10) : null));
+
+// Add one contributing entry to a vendor's total and its drill-down list, so
+// every row's breakdown sums to exactly the Total it shows.
+function addEntry(map, entries, vendor, amount, entry) {
+  map.set(vendor, round2((map.get(vendor) || 0) + amount));
+  if (!entries.has(vendor)) entries.set(vendor, []);
+  entries.get(vendor).push({ ...entry, amount: round2(amount) });
+}
+
+// Row-level cash-basis source (one row per document) into the running map.
+async function accumulate(map, entries, sql, args, type) {
   const [rows] = await pool.execute(sql, args);
   for (const r of rows) {
     if (!r.vendor || String(r.vendor).trim() === '') continue;
-    const key = String(r.vendor);
-    map.set(key, round2((map.get(key) || 0) + sign * num(r.amt)));
+    addEntry(map, entries, String(r.vendor), num(r.amt), {
+      name: String(r.details || '').trim() || String(r.vendor),
+      account: r.account || '',
+      ref: r.ref || '',
+      date: ymd(r.dt),
+      type,
+    });
   }
 }
 
@@ -124,28 +139,32 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
   const currency = await getBaseCurrency(orgId);
 
   const map = new Map();
+  const entries = new Map(); // vendor → contributing entries (the row's breakdown)
 
   if (isCash) {
     // Cash basis = money paid out.
-    await accumulate(map,
-      `SELECT vendor_name AS vendor, SUM(amount) AS amt
+    await accumulate(map, entries,
+      `SELECT vendor_name AS vendor, amount AS amt, date AS dt, payment_number AS ref,
+              COALESCE(NULLIF(description, ''), reference_number) AS details,
+              paid_through_account_name AS account
          FROM zb_vendor_payments
         WHERE user_id = ? AND org_id = ? AND COALESCE(is_deleted, 0) = 0
-          AND date BETWEEN ? AND ?
-        GROUP BY vendor_name`, base, 1);
-    await accumulate(map,
-      `SELECT vendor_name AS vendor, SUM(total_without_tax) AS amt
+          AND date BETWEEN ? AND ?`, base, 'Vendor Payment');
+    await accumulate(map, entries,
+      `SELECT vendor_name AS vendor, total_without_tax AS amt, date AS dt, reference_number AS ref,
+              description AS details, account_name AS account
          FROM expense_entries
         WHERE user_id = ? AND org_id = ? AND COALESCE(is_deleted, 0) = 0
-          AND date BETWEEN ? AND ?
-        GROUP BY vendor_name`, base, 1);
+          AND date BETWEEN ? AND ?`, base, 'Expense');
   } else {
     // Accrual basis = the ledger's own expense-account activity, so the total
     // ties to the platform's P&L expense total (not just the subset that has
     // a bills/expenses document row). transaction_date drives the window, not
     // the document's own `date` column, matching how the ledger recognises it.
     const [lines] = await pool.execute(
-      `SELECT source_id, debit, credit
+      `SELECT source_id, COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
+              transaction_date AS dt, reference_number AS ref, account_name AS account,
+              transaction_details AS details, COALESCE(transaction_type, source_type) AS ttype
          FROM account_transactions
         WHERE user_id = ? AND org_id = ? AND account_group = 'expense'
           AND transaction_date BETWEEN ? AND ?
@@ -157,7 +176,14 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
       const key = String(l.source_id || '').trim().toLowerCase();
       const vendor = docs.get(key) || 'Not Specified';
       const amt = num(l.debit) - num(l.credit); // expense accounts run debit-normal
-      map.set(vendor, round2((map.get(vendor) || 0) + amt));
+      if (amt === 0) { if (!map.has(vendor)) map.set(vendor, 0); continue; } // keep the row, skip the ₹0 entry
+      addEntry(map, entries, vendor, amt, {
+        name: String(l.details || '').trim() || vendor,
+        account: l.account || '',
+        ref: l.ref || '',
+        date: ymd(l.dt),
+        type: l.ttype || '',
+      });
     }
   }
 
@@ -173,7 +199,13 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
   const rows = [];
   let grand = 0;
   for (const v of vendors) {
-    rows.push({ label: v.name, level: 0, cells: { amount: v.amount } });
+    const list = (entries.get(v.name) || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    rows.push({
+      label: v.name,
+      level: 0,
+      cells: { amount: v.amount },
+      ...(list.length ? { cellDrill: { amount: list } } : {}),
+    });
     grand += v.amount;
   }
   rows.push({ label: 'TOTAL', isTotal: true, level: 0, cells: { amount: round2(grand) } });

@@ -115,8 +115,8 @@ function classify(group, typeCode) {
 async function netsByAccount(userId, orgId, from, to) {
   const [accts] = await pool.execute(
     `SELECT account_id, account_name, account_group, account_type_code,
-            SUM(debit)  AS d,
-            SUM(credit) AS c
+            SUM(COALESCE(base_debit, debit))  AS d,
+            SUM(COALESCE(base_credit, credit)) AS c
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?
@@ -163,7 +163,7 @@ async function breakdownLines(userId, orgId, from, to, ytdFrom) {
   const [lines] = await pool.execute(
     `SELECT account_id, account_group, account_type_code,
             transaction_date AS dt, reference_number AS ref, account_name AS account,
-            source_type AS src, debit, credit
+            source_type AS src, COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?

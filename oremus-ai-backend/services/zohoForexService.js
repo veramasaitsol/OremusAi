@@ -208,7 +208,8 @@ async function realisedFromLedger(userId, orgId, base, from, to) {
   const where = FX_ACCOUNT_LIKE.map(() => 'LOWER(account_name) LIKE ?').join(' OR ');
   const [lines] = await pool.execute(
     `SELECT transaction_date, transaction_type, source_type, source_id,
-            account_name, currency_code, debit, credit
+            account_name, currency_code,
+            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_date BETWEEN ? AND ?

@@ -287,7 +287,7 @@ async function buildQuickbooksTaxLiability(userId, orgId, from, to) {
                  WHEN LOWER(account_name) LIKE 'input sgst%' THEN 'SGST'
                  WHEN LOWER(account_name) LIKE 'input igst%' THEN 'IGST' END AS levy,
             transaction_date, reference_number, transaction_number, transaction_type, source_id,
-            debit, credit
+            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND (LOWER(account_name) LIKE 'input cgst%'
@@ -365,7 +365,8 @@ const XERO_GST_RATE = { CGST: 9, SGST: 9, IGST: 18 };
 // credits on an Input account are ignored the same way the header is).
 async function xeroAccountBreakdown(userId, orgId, from, to, accountPrefix, side, onlyManualJournal) {
   const [rows] = await pool.execute(
-    `SELECT transaction_date, reference_number, transaction_number, source_type, debit, credit
+    `SELECT transaction_date, reference_number, transaction_number, source_type,
+            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND account_name LIKE ?
@@ -402,9 +403,9 @@ async function buildXeroTaxLiability(userId, orgId, from, to) {
   // in the ManualJournal entries.
   const [rows] = await pool.execute(
     `SELECT account_name,
-            SUM(CASE WHEN source_type = 'ManualJournal' THEN credit ELSE 0 END) AS mj_credit,
-            SUM(credit) AS credit_total,
-            SUM(CASE WHEN source_type = 'ManualJournal' THEN debit ELSE 0 END) AS mj_debit
+            SUM(CASE WHEN source_type = 'ManualJournal' THEN COALESCE(base_credit, credit) ELSE 0 END) AS mj_credit,
+            SUM(COALESCE(base_credit, credit)) AS credit_total,
+            SUM(CASE WHEN source_type = 'ManualJournal' THEN COALESCE(base_debit, debit) ELSE 0 END) AS mj_debit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND (account_name LIKE 'Output CGST%'
@@ -440,7 +441,7 @@ async function buildXeroTaxLiability(userId, orgId, from, to) {
 
   // Also include Input tax accounts as negative rows (ITC claimed)
   const [inputRows] = await pool.execute(
-    `SELECT account_name, SUM(debit) AS debit_total
+    `SELECT account_name, SUM(COALESCE(base_debit, debit)) AS debit_total
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND (account_name LIKE 'Input CGST%'
@@ -627,7 +628,7 @@ async function buildTaxLiability(userId, params = {}) {
   const [rcmBillRows] = await pool.execute(
     `SELECT source_id AS doc_id, account_name,
             transaction_number AS doc_number, transaction_date AS doc_date,
-            SUM(credit) - SUM(debit) AS amount
+            SUM(COALESCE(base_credit, credit)) - SUM(COALESCE(base_debit, debit)) AS amount
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND transaction_type = 'bill'
@@ -665,8 +666,9 @@ async function buildTaxLiability(userId, params = {}) {
 
   // Query for "Others" — manual transactions in Tax Payable accounts
   const [otherRows] = await pool.execute(
-    `SELECT transaction_date, reference_number, transaction_number, 
-            source_type, transaction_type, debit, credit
+    `SELECT transaction_date, reference_number, transaction_number,
+            source_type, transaction_type,
+            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND (

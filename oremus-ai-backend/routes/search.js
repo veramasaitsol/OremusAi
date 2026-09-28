@@ -67,7 +67,7 @@ router.get('/', async (req, res) => {
         `SELECT 'account' AS type,
                 transaction_number AS ref,
                 COALESCE(NULLIF(transaction_details,''), account_name) AS title,
-                COALESCE(credit, debit, 0) AS amount,
+                COALESCE(COALESCE(base_credit, credit), COALESCE(base_debit, debit), 0) AS amount,
                 transaction_date AS date,
                 account_group AS status
          FROM account_transactions

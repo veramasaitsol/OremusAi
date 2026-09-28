@@ -122,7 +122,7 @@ async function tdsSections(userId, orgId) {
  */
 async function buildLedgerTdsSummary(userId, orgId, from, to) {
   const [rows] = await pool.execute(
-    `SELECT transaction_id, transaction_details, source_type, credit
+    `SELECT transaction_id, transaction_details, source_type, COALESCE(base_credit, credit) AS credit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND account_name LIKE '%TDS Payable%'
@@ -142,7 +142,7 @@ async function buildLedgerTdsSummary(userId, orgId, from, to) {
     const allIds = [...new Set(rows.map((r) => r.transaction_id))];
     if (allIds.length) {
       const [baseRows] = await pool.execute(
-        `SELECT transaction_id, SUM(debit) AS base
+        `SELECT transaction_id, SUM(COALESCE(base_debit, debit)) AS base
            FROM account_transactions
           WHERE user_id = ? AND org_id = ? AND account_group = 'expense'
             AND transaction_id IN (${allIds.map(() => '?').join(',')})

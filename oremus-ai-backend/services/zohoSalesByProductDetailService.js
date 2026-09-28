@@ -119,8 +119,8 @@ async function buildFromAccountTransactions(userId, orgId, from, to) {
             DATE_FORMAT(at.transaction_date, '%Y-%m-%d') AS d,
             at.account_name        AS product,
             at.transaction_details AS description,
-            ROUND(at.credit - at.debit, 2) AS amount,
-            at.currency_code,
+            ROUND(COALESCE(at.base_credit, at.credit) - COALESCE(at.base_debit, at.debit), 2) AS amount,
+            COALESCE(at.base_currency_code, at.currency_code) AS currency_code,
             at.source_type
        FROM account_transactions at
       WHERE at.user_id = ? AND at.org_id = ?

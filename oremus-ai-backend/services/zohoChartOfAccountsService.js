@@ -162,7 +162,7 @@ async function ledgerAccounts(userId, orgId, asOf) {
             MAX(account_name)      AS name,
             MAX(account_group)     AS acct_group,
             MAX(account_type_code) AS type_code,
-            SUM(debit) - SUM(credit) AS net
+            SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND (transaction_date IS NULL OR transaction_date <= ?)

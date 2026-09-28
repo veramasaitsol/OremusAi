@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { X, BookOpen, Loader2 } from 'lucide-react';
+import { X, BookOpen, Loader2, Download } from 'lucide-react';
 import Modal from '../ui/Modal.jsx';
 import axiosClient from '../../services/axiosClient.js';
 import { fmt } from '../../utils/fmt.js';
+import { exportRowsCSV, exportRowsXLSX } from '../../utils/exportReport.js';
 import SourceDocumentModal from './SourceDocumentModal.jsx';
 
 // Report → Account drill: one account's General Ledger from the posted
@@ -42,6 +43,31 @@ export default function AccountLedgerModal({
   const ledger = data?.ledger || [];
   const totals = data?.totals;
 
+  // Export every line (not just what's on screen) with the original-currency
+  // amount and rate beside the base-currency figures, so a difference against
+  // the platform's own report can be traced line by line.
+  const exportLedger = (format) => {
+    if (!ledger.length) return;
+    const n = (v) => (v == null || v === '' ? '' : Number(v));
+    const headers = [
+      'Date', 'Transaction Type', 'Num', 'Name', 'Memo',
+      'Currency', 'Exchange Rate', 'Original Debit', 'Original Credit',
+      `Debit (${cur})`, `Credit (${cur})`, `Balance (${cur})`,
+    ];
+    const rows = ledger.map((r) => (r.isOpening
+      ? ['', 'Beginning Balance', '', '', '', '', '', '', '', '', '', n(r.balance)]
+      : [
+        r.date ? String(r.date).slice(0, 10) : '', r.sourceType || '', r.docNumber || '',
+        r.name || '', r.memo || '', r.currencyCode || '', n(r.exchangeRate),
+        n(r.nativeDebit), n(r.nativeCredit), n(r.debit), n(r.credit), n(r.balance),
+      ]));
+    if (totals) rows.push(['', 'Total', '', '', '', '', '', '', '', n(totals.debit), n(totals.credit), n(totals.balance)]);
+    const period = from && to ? `${from} to ${to}` : (to ? `As of ${to}` : '');
+    const name = `${accountName || 'Account'} ledger`;
+    if (format === 'xlsx') exportRowsXLSX(headers, rows, name, [accountName || 'Account', `General Ledger ${period}`.trim()]);
+    else exportRowsCSV(headers, rows, name);
+  };
+
   return (
     <>
       <Modal open={open} onClose={onClose} size="lg">
@@ -55,14 +81,34 @@ export default function AccountLedgerModal({
               <p className="text-[11px] text-navy-400">General Ledger{from && to ? ` · ${from} → ${to}` : (to ? ` · As of ${to}` : '')}</p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-navy-400 hover:text-navy-700 dark:hover:text-navy-200"
-            aria-label="Close"
-          >
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            {ledger.length > 0 && !loading && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => exportLedger('xlsx')}
+                  className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-navy-600 dark:text-navy-300 hover:text-brand-600"
+                >
+                  <Download size={13} /> Excel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => exportLedger('csv')}
+                  className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-navy-600 dark:text-navy-300 hover:text-brand-600"
+                >
+                  <Download size={13} /> CSV
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-navy-400 hover:text-navy-700 dark:hover:text-navy-200"
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+          </div>
         </header>
 
         <div className="flex-1 overflow-y-auto scroll-thin">

@@ -58,7 +58,7 @@ const FX_ADJUSTMENT_RE = /exchange\s*(gain|loss)|reali[sz]ed\s*(currency|exchang
 async function fxAdjustmentsByCustomer(userId, orgId, from, to) {
   const [rows] = await pool.execute(
     `SELECT COALESCE(NULLIF(TRIM(cust.customer_name), ''), 'Unknown') AS customer,
-            ROUND(SUM(fx.credit - fx.debit), 2) AS total
+            ROUND(SUM(COALESCE(fx.base_credit, fx.credit) - COALESCE(fx.base_debit, fx.debit)), 2) AS total
        FROM account_transactions fx
        JOIN (
          SELECT transaction_id, MIN(transaction_details) AS customer_name
@@ -275,7 +275,7 @@ async function buildSalesByCustomer(userId, params = {}) {
             COUNT(DISTINCT CASE WHEN doc.source_type IN (${inList(SALES_INVOICE_TYPES)})
                                  THEN doc.source_id END) AS cnt,
             ROUND(SUM(doc.amount), 2) AS total,
-            MAX(doc.currency_code) AS currency
+            MAX(COALESCE(doc.base_currency_code, doc.currency_code)) AS currency
        FROM (
          SELECT at.transaction_id,
                 MAX(at.source_id) AS source_id,
@@ -284,8 +284,9 @@ async function buildSalesByCustomer(userId, params = {}) {
                   MAX(CASE WHEN at.account_type_code = 'accounts_receivable' THEN NULLIF(TRIM(at.transaction_details), '') END),
                   MAX(CASE WHEN at.account_group <> 'asset' THEN NULLIF(TRIM(at.transaction_details), '') END)
                 ) AS customer,
-                ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS amount,
-                MAX(at.currency_code) AS currency_code
+                ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN COALESCE(at.base_credit, at.credit) - COALESCE(at.base_debit, at.debit) ELSE 0 END), 2) AS amount,
+                MAX(at.currency_code) AS currency_code,
+                MAX(at.base_currency_code) AS base_currency_code
            FROM account_transactions at
           WHERE at.user_id = ? AND at.org_id = ?
             AND at.source_type IN (${inList(SALES_DOC_TYPES)})
@@ -412,8 +413,8 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
             DATE_FORMAT(MAX(at.transaction_date), '%Y-%m-%d') AS d,
             MAX(at.account_name) AS product,
             MAX(CASE WHEN at.account_group <> 'asset' THEN at.transaction_details END) AS description,
-            ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN at.credit - at.debit ELSE 0 END), 2) AS amount,
-            MAX(at.currency_code) AS currency_code,
+            ROUND(SUM(CASE WHEN at.account_group <> 'asset' THEN COALESCE(at.base_credit, at.credit) - COALESCE(at.base_debit, at.debit) ELSE 0 END), 2) AS amount,
+            MAX(COALESCE(at.base_currency_code, at.currency_code)) AS currency_code,
             MAX(at.source_type) AS source_type
        FROM account_transactions at
       WHERE at.user_id = ? AND at.org_id = ?

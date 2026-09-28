@@ -71,10 +71,10 @@ async function buildBankSummary(userId, params = {}) {
   const [rows] = await pool.execute(
     `SELECT account_id,
             MAX(account_name) AS account_name,
-            SUM(CASE WHEN transaction_date <  ? THEN debit - credit ELSE 0 END) AS opening,
-            SUM(CASE WHEN transaction_date >= ? AND transaction_date <= ? AND transaction_id NOT LIKE 'xero-recon:%' THEN debit  ELSE 0 END) AS received,
-            SUM(CASE WHEN transaction_date >= ? AND transaction_date <= ? AND transaction_id NOT LIKE 'xero-recon:%' THEN credit ELSE 0 END) AS spent,
-            SUM(CASE WHEN transaction_date >= ? AND transaction_date <= ? AND transaction_id LIKE 'xero-recon:%' THEN debit - credit ELSE 0 END) AS recon_net
+            SUM(CASE WHEN transaction_date <  ? THEN COALESCE(base_debit, debit) - COALESCE(base_credit, credit) ELSE 0 END) AS opening,
+            SUM(CASE WHEN transaction_date >= ? AND transaction_date <= ? AND transaction_id NOT LIKE 'xero-recon:%' THEN COALESCE(base_debit, debit)  ELSE 0 END) AS received,
+            SUM(CASE WHEN transaction_date >= ? AND transaction_date <= ? AND transaction_id NOT LIKE 'xero-recon:%' THEN COALESCE(base_credit, credit) ELSE 0 END) AS spent,
+            SUM(CASE WHEN transaction_date >= ? AND transaction_date <= ? AND transaction_id LIKE 'xero-recon:%' THEN COALESCE(base_debit, debit) - COALESCE(base_credit, credit) ELSE 0 END) AS recon_net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND LOWER(account_type_code) IN (${placeholders})

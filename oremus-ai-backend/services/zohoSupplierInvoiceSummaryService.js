@@ -81,7 +81,7 @@ async function fetchPayableCreditNotes(userId, orgId, from, to) {
     `SELECT transaction_details AS vendor, source_id, source_type,
             MIN(transaction_date) AS doc_date,
             MAX(reference_number) AS reference,
-            SUM(credit) - SUM(debit) AS net
+            SUM(COALESCE(base_credit, credit)) - SUM(COALESCE(base_debit, debit)) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND account_type_code = 'accounts_payable'
@@ -159,8 +159,8 @@ async function apBalancesAsOf(userId, orgId, to) {
             MAX(NULLIF(reference_number, '')) AS ref,
             MAX(CASE WHEN source_type LIKE '%CREDIT%' OR transaction_type LIKE '%Credit%'
                      THEN 1 ELSE 0 END) AS is_credit,
-            ROUND(SUM(credit), 2) AS cr,
-            ROUND(SUM(debit), 2) AS dr
+            ROUND(SUM(COALESCE(base_credit, credit)), 2) AS cr,
+            ROUND(SUM(COALESCE(base_debit, debit)), 2) AS dr
        FROM account_transactions
       WHERE user_id = ? AND org_id = ?
         AND account_type_code = 'accounts_payable'
@@ -282,8 +282,8 @@ async function buildSupplierInvoiceSummary(userId, params = {}) {
       `SELECT COALESCE(NULLIF(at.reference_number, ''), CONCAT('src:', at.source_id)) AS bill_number,
               at.transaction_details AS vendor_name,
               MIN(at.transaction_date) AS date,
-              ROUND(SUM(CASE WHEN at.credit > 0 THEN at.credit ELSE 0 END), 2) AS total,
-              at.currency_code
+              ROUND(SUM(CASE WHEN at.credit > 0 THEN COALESCE(at.base_credit, at.credit) ELSE 0 END), 2) AS total,
+              COALESCE(at.base_currency_code, at.currency_code) AS currency_code
          FROM account_transactions at
         WHERE at.user_id = ? AND org_id = ?
           AND at.account_type_code = 'accounts_payable'
@@ -292,7 +292,7 @@ async function buildSupplierInvoiceSummary(userId, params = {}) {
           AND ( UPPER(COALESCE(at.source_type, '')) IN ('ACCPAY', 'BILL', 'BILLPAYABLE', 'VENDORBILL', 'SUPPLIERBILL')
                 OR at.transaction_type IN ('Bill', 'Vendor Bill', 'Supplier Bill') )
           AND at.credit > 0
-        GROUP BY bill_number, at.transaction_details, at.currency_code
+        GROUP BY bill_number, at.transaction_details, at.currency_code, at.base_currency_code
         ORDER BY date ASC, vendor_name ASC`,
       [userId, orgId, from, to]
     );
