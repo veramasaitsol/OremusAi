@@ -138,8 +138,8 @@ async function buildVendorBalanceDetail(userId, params = {}) {
   for (const c of await fetchUnallocatedVendorCredits(userId, orgId, asOf)) {
     push(c.vendor, {
       date: c.date,
-      txnType: 'Vendor Credit',
-      invoice: '',
+      txnType: c.type || 'Vendor Credit',
+      invoice: c.docNumber || '',
       dueDate: '',
       amount: c.amount,
       balance: c.amount,
