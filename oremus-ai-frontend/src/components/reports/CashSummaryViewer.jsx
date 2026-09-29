@@ -21,6 +21,7 @@ import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { useReportSort } from './useReportSort.jsx';
 
 const XERO_BLUE = '#1A73E8';
 
@@ -154,7 +155,10 @@ export default function CashSummaryViewer() {
     setBdPage({});
   }, [data]);
 
-  const rows = data?.rows || [];
+  // Sorting reorders rows, so row-index keyed expansion state resets with it.
+  const { rows, header } = useReportSort(data?.rows || [], {
+    onChange: () => { setExpanded({}); setExpandedGroups({}); setBdPage({}); },
+  });
   const rowPad = 'py-1.5';
 
   return (
@@ -284,10 +288,10 @@ export default function CashSummaryViewer() {
               <table className="w-full text-[13px]">
                 <thead>
                   <tr className="text-[12px] text-navy-500 dark:text-navy-400 [&>th]:sticky [&>th]:top-0 [&>th]:z-20 [&>th]:bg-white dark:[&>th]:bg-navy-900 [&>th]:border-b [&>th]:border-navy-200 dark:[&>th]:border-navy-700">
-                    <th className="text-left font-semibold py-2" />
-                    <th className="text-right font-semibold py-2 px-3 w-[160px]">{curLabel}</th>
-                    {showCompare && <th className="text-right font-semibold py-2 px-3 w-[150px]">Average (YTD)</th>}
-                    {showCompare && <th className="text-right font-semibold py-2 pl-3 w-[130px]">Variance</th>}
+                    <th className="text-left font-semibold py-2">{header({ key: 'label', label: '' }, { isLabel: true })}</th>
+                    <th className="text-right font-semibold py-2 px-3 w-[160px]">{header({ key: 'cur', label: curLabel, align: 'right' })}</th>
+                    {showCompare && <th className="text-right font-semibold py-2 px-3 w-[150px]">{header({ key: 'avg', label: 'Average (YTD)', align: 'right' })}</th>}
+                    {showCompare && <th className="text-right font-semibold py-2 pl-3 w-[130px]">{header({ key: 'var', label: 'Variance', align: 'right' })}</th>}
                   </tr>
                 </thead>
                 <tbody>

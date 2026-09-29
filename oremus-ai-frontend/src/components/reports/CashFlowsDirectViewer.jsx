@@ -21,6 +21,7 @@ import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { useReportSort } from './useReportSort.jsx';
 
 const XERO_BLUE = '#1A73E8';
 
@@ -87,7 +88,7 @@ export default function CashFlowsDirectViewer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.dateRange, filters.customFrom, filters.customTo]);
 
-  const rows = data?.rows || [];
+  const { rows, header } = useReportSort(data?.rows || []);
   const rowPad = 'py-1.5';
 
   return (
@@ -221,8 +222,8 @@ export default function CashFlowsDirectViewer() {
                 <thead>
                   {/* Band — Description | Amount header */}
                   <tr className="text-[12px] font-semibold text-navy-600 dark:text-navy-300 [&>th]:sticky [&>th]:top-0 [&>th]:z-20 [&>th]:bg-white dark:[&>th]:bg-navy-900">
-                    <th className="text-left py-2 px-3">Description</th>
-                    <th className="text-right py-2 px-3 w-[160px]">Amount</th>
+                    <th className="text-left py-2 px-3">{header({ key: 'label', label: 'Description' }, { isLabel: true })}</th>
+                    <th className="text-right py-2 px-3 w-[160px]">{header({ key: 'cur', label: 'Amount', align: 'right' })}</th>
                   </tr>
                   <tr className="text-[12px] text-navy-500 dark:text-navy-400 [&>th]:sticky [&>th]:top-[34px] [&>th]:z-20 [&>th]:bg-white dark:[&>th]:bg-navy-900 [&>th]:border-b [&>th]:border-navy-200 dark:[&>th]:border-navy-700">
                     <th className="text-left font-semibold py-1.5" />

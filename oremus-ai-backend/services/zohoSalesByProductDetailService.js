@@ -35,6 +35,7 @@
  */
 
 const pool = require('../config/db');
+const { invoiceFxContext, rateToBase } = require('./invoiceFx');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -141,7 +142,7 @@ async function buildFromInvoiceLineItems(userId, orgId, from, to) {
     `SELECT COALESCE(NULLIF(TRIM(li.item_name), ''), NULLIF(TRIM(li.name), '')) AS product,
             li.description, li.quantity, li.rate, li.item_total, li.tax_amount,
             li.zoho_invoice_id, inv.invoice_number, inv.customer_name, inv.date,
-            ROUND(inv.tax_total, 2) AS tax_total, inv.currency_code
+            ROUND(inv.tax_total, 2) AS tax_total, inv.currency_code, inv.exchange_rate
        FROM zb_invoice_line_items li
        JOIN invoices inv
          ON inv.zoho_id = li.zoho_invoice_id
@@ -212,18 +213,25 @@ async function buildSalesByProductDetail(userId, params = {}) {
           spreadAmt.set(ln, amount);
         });
       }
-      productRows = lines.map(ln => ({
-        customer:      ln.customer_name || '',
-        invoice_number: ln.invoice_number || '',
-        d:             ln.date ? fmtDate(ln.date) : '',
-        product:       ln.product || 'Not Specified',
-        description:   ln.description || '',
-        amount:        round2(spreadAmt.get(ln) ?? 0),
-        currency_code: ln.currency_code || 'INR',
-        source_type:   'ACCREC',
-        _qty:          num(ln.quantity),
-        _price:        num(ln.rate),
-      }));
+      // Lines are in each invoice's own currency (a CAD invoice in a USD
+      // company) — convert amount and price at the invoice's booked rate
+      // (invoices.exchange_rate) so the report reads in the base currency.
+      const fx = await invoiceFxContext(orgId);
+      productRows = lines.map(ln => {
+        const m = rateToBase(ln.currency_code, ln.exchange_rate, fx);
+        return {
+          customer:      ln.customer_name || '',
+          invoice_number: ln.invoice_number || '',
+          d:             ln.date ? fmtDate(ln.date) : '',
+          product:       ln.product || 'Not Specified',
+          description:   ln.description || '',
+          amount:        round2((spreadAmt.get(ln) ?? 0) * m),
+          currency_code: fx.base,
+          source_type:   'ACCREC',
+          _qty:          num(ln.quantity),
+          _price:        round2(num(ln.rate) * m),
+        };
+      });
       hasLineItems = true;
     }
   }

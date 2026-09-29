@@ -63,10 +63,13 @@ async function vendorByDocId(userId, orgId, from, to) {
     `SELECT COALESCE(qbo_id, xero_id, zoho_id) AS pid, vendor_name
        FROM bills WHERE ${scope} AND COALESCE(vendor_name,'') <> ''`;
   push();
+  // QuickBooks expenses carry their date in expense_date (date is NULL).
   sql +=
     ` UNION ALL
       SELECT COALESCE(qbo_id, xero_id, zoho_id) AS pid, vendor_name
-        FROM expense_entries WHERE ${scope} AND COALESCE(vendor_name,'') <> ''`;
+        FROM expense_entries
+       WHERE user_id = ? AND org_id = ? AND COALESCE(is_deleted, 0) = 0
+         AND COALESCE(date, expense_date) BETWEEN ? AND ? AND COALESCE(vendor_name,'') <> ''`;
   push();
   sql +=
     ` UNION ALL
@@ -82,6 +85,46 @@ async function vendorByDocId(userId, orgId, from, to) {
     byId.set(pid, String(r.vendor_name).trim());
   }
   return byId;
+}
+
+// QuickBooks: the GL's Name column (stored in transaction_details) is often
+// blank on a document's expense line but present on its other legs — a bill
+// payment's A/P line names the vendor, as does a vendor credit's. QuickBooks groups this
+// report by that Name, so resolve each document to the first line whose
+// details is a real vendor name. Keyed `${source_type}|${source_id}`.
+const CUSTOMER_DOC_TYPES = new Set(['Payment', 'Invoice']);
+
+async function qboNameByDoc(userId, orgId, lines) {
+  const out = new Map();
+  if (!lines.length) return out;
+
+  const names = new Map();
+  const [vendors] = await pool.execute(
+    'SELECT contact_name, company_name, full_name FROM vendors WHERE user_id = ? AND org_id = ?', [userId, orgId]);
+  for (const v of vendors) {
+    const display = String(v.contact_name || v.company_name || v.full_name || '').trim();
+    for (const n of [v.contact_name, v.company_name, v.full_name]) {
+      const k = String(n || '').trim().toLowerCase();
+      if (k && display && !names.has(k)) names.set(k, display);
+    }
+  }
+
+  const ids = [...new Set(lines.map((l) => String(l.source_id || '')).filter(Boolean))];
+  for (let i = 0; i < ids.length; i += 1000) {
+    const chunk = ids.slice(i, i + 1000);
+    const [rows] = await pool.query(
+      `SELECT source_type, source_id, transaction_details
+         FROM account_transactions
+        WHERE user_id = ? AND org_id = ? AND source_id IN (?)`,
+      [userId, orgId, chunk]
+    );
+    for (const r of rows) {
+      const key = `${r.source_type}|${String(r.source_id).trim().toLowerCase()}`;
+      const name = names.get(String(r.transaction_details || '').trim().toLowerCase());
+      if (name && !out.has(key)) out.set(key, name);
+    }
+  }
+  return out;
 }
 
 function resolveRange(params) {
@@ -164,7 +207,8 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
     const [lines] = await pool.execute(
       `SELECT source_id, COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
               transaction_date AS dt, reference_number AS ref, account_name AS account,
-              transaction_details AS details, COALESCE(transaction_type, source_type) AS ttype
+              transaction_details AS details, COALESCE(transaction_type, source_type) AS ttype,
+              source_type AS stype
          FROM account_transactions
         WHERE user_id = ? AND org_id = ? AND account_group = 'expense'
           AND transaction_date BETWEEN ? AND ?
@@ -172,9 +216,16 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
       base
     );
     const docs = await vendorByDocId(userId, orgId, from, to);
+    const [[qbo]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
+      .catch(() => [[null]]);
+    const qboNames = qbo ? await qboNameByDoc(userId, orgId, lines) : new Map();
     for (const l of lines) {
+      // QuickBooks: exchange gain/loss on a customer's invoice or payment is
+      // receivables activity, not spend with a vendor — QuickBooks leaves it
+      // out of this report.
+      if (qbo && CUSTOMER_DOC_TYPES.has(String(l.stype || ''))) continue;
       const key = String(l.source_id || '').trim().toLowerCase();
-      const vendor = docs.get(key) || 'Not Specified';
+      const vendor = docs.get(key) || qboNames.get(`${l.stype}|${key}`) || 'Not Specified';
       const amt = num(l.debit) - num(l.credit); // expense accounts run debit-normal
       if (amt === 0) { if (!map.has(vendor)) map.set(vendor, 0); continue; } // keep the row, skip the ₹0 entry
       addEntry(map, entries, vendor, amt, {

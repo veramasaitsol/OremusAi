@@ -3,8 +3,10 @@ import { X, Download } from 'lucide-react';
 import { fmt } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
 import { breakdownToSheet, exportRowsCSV, exportRowsXLSX } from '../../utils/exportReport.js';
+import SortableTh, { useSortedEntries } from './SortableTh.jsx';
 
 const PAGE_SIZE =100;
+const SORT_KINDS = { name: 'name', date: 'date', amount: 'amount' };
 
 export default function DrillDownModal({
   open, onClose,
@@ -23,6 +25,8 @@ export default function DrillDownModal({
   divisorLabel,
 }) {
   const [page, setPage] = useState(0);
+  const { sorted, sort, toggle } = useSortedEntries(rows, SORT_KINDS);
+  const onSort = (key) => { toggle(key); setPage(0); };
 
   // Reset page when modal opens with new data
   if (open && page > 0 && rows.length <= PAGE_SIZE) setPage(0);
@@ -32,7 +36,7 @@ export default function DrillDownModal({
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
   const start = safePage * PAGE_SIZE;
-  const pageRows = rows.slice(start, start + PAGE_SIZE);
+  const pageRows = sorted.slice(start, start + PAGE_SIZE);
 
   const fmtAmount = (v) => {
     if (v == null) return '';
@@ -121,7 +125,17 @@ export default function DrillDownModal({
           <table className="w-full text-[12.5px]">
             <thead className="sticky top-0 bg-navy-50 dark:bg-navy-950">
               <tr className="text-[11px] text-navy-500 dark:text-navy-400 border-b border-navy-200 dark:border-navy-700">
-                {cols.map((c) => (
+                {cols.map((c) => (SORT_KINDS[c.key] ? (
+                  <SortableTh
+                    key={c.key}
+                    label={c.label}
+                    sortKey={c.key}
+                    align={c.align}
+                    sort={sort}
+                    onSort={onSort}
+                    className="font-semibold py-2 px-4"
+                  />
+                ) : (
                   <th
                     key={c.key}
                     className={cn(
@@ -131,7 +145,7 @@ export default function DrillDownModal({
                   >
                     {c.label}
                   </th>
-                ))}
+                )))}
               </tr>
             </thead>
             <tbody>

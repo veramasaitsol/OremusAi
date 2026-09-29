@@ -23,6 +23,7 @@ import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { useReportSort } from './useReportSort.jsx';
 import DrillDownModal from './DrillDownModal.jsx';
 
 const XERO_BLUE = '#1A73E8';
@@ -177,7 +178,7 @@ export default function BudgetVarianceViewer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.dateRange, filters.customFrom, filters.customTo]);
 
-  const rows = data?.rows || [];
+  const { rows, header } = useReportSort(data?.rows || [], { getValue: (r, key) => derive(r.cells)[key] });
   const rowPad = 'py-1';
 
   const renderCell = (val, type) => {
@@ -332,7 +333,7 @@ export default function BudgetVarianceViewer() {
                       <th colSpan={2} className="sticky top-0 z-20 bg-white dark:bg-navy-900" />
                     </tr>
                     <tr className="text-[11.5px] text-navy-500 dark:text-navy-400">
-                      <th className="sticky top-[26px] z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 text-left font-semibold py-2 pr-4" />
+                      <th className="sticky top-[26px] z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 text-left font-semibold py-2 pr-4">{header({ key: 'label', label: '' }, { isLabel: true })}</th>
                       {valueCols.map((c, idx) => (
                         <th
                           key={c.key}
@@ -341,7 +342,7 @@ export default function BudgetVarianceViewer() {
                             idx === 4 && 'border-l border-navy-200 dark:border-navy-700',
                           )}
                         >
-                          {c.label}
+                          {header({ align: 'right', ...c })}
                         </th>
                       ))}
                     </tr>

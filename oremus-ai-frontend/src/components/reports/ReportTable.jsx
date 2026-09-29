@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react';
 import { useSelector } from 'react-redux';
-import { ChevronRight, ChevronDown, ChevronsUpDown, Download } from 'lucide-react';
+import { ChevronRight, ChevronDown, Download } from 'lucide-react';
 import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { selectFilters } from '../../features/reports/reportsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
@@ -9,6 +9,10 @@ import AccountLedgerModal from './AccountLedgerModal.jsx';
 import SourceDocumentModal from './SourceDocumentModal.jsx';
 import BreakdownModal from './BreakdownModal.jsx';
 import { exportRowsCSV } from '../../utils/exportReport.js';
+import { sortKindFor, sortReportRows } from '../../utils/sortReportRows.js';
+import { SortHeaderButton } from './useReportSort.jsx';
+import SortableTh from './SortableTh.jsx';
+import { sortEntries, nextSort } from '../../utils/sortCompare.js';
 
 // `numberFormat` maps the "Number format" filter (indian/international) to
 // the locale `fmt` should group digits with, overriding the currency default
@@ -92,6 +96,7 @@ function HorizontalSide({ side, decimals, currency, includeZero, locale, parens 
 }
 
 const DRILL_PAGE_SIZE = 25;
+const DRILL_SORT_KINDS = { name: 'name', date: 'date', amount: 'amount' };
 
 export default function ReportTable({ data, variant = 'standard', asOf = false }) {
   const filters = useSelector(selectFilters);
@@ -101,6 +106,8 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
   const [source, setSource] = useState(null);  // { sourceType, sourceRef }
   const [drillPage, setDrillPage] = useState({});  // pagination for inline drill-down
   const [breakdownModal, setBreakdownModal] = useState(null);  // { title, subtitle, entries }
+  const [sort, setSort] = useState(null);  // column-header sort: { key, isLabel, kind, dir }
+  const [drillSort, setDrillSort] = useState(null);  // inline drill tables: { key, dir }
 
   // Resolve the report's active date range so the account ledger drill scopes
   // to the same period the report was run for.
@@ -165,7 +172,53 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
       return v == null || v === '' || (typeof v === 'number' && v === 0);
     });
   };
-  const rows = filters.includeZero ? data.rows : data.rows.filter((r) => !isZeroLeaf(r));
+  const baseRows = filters.includeZero ? data.rows : data.rows.filter((r) => !isZeroLeaf(r));
+
+  // Name / date / amount columns sort on a header click (ascending →
+  // descending → report order), within each section — see sortReportRows.
+  // The first column is the row label (r.label), whatever its key.
+  const sortActive = sort && cols.some((c, ci) => (ci === 0) === sort.isLabel && c.key === sort.key);
+  const rows = sortActive
+    ? sortReportRows(baseRows, { key: sort.key, isLabel: sort.isLabel }, sort.kind, sort.dir)
+    : baseRows;
+  const onSort = (key, isLabel, kind) => {
+    setSort((s) => {
+      if (!s || s.key !== key) return { key, isLabel, kind, dir: 'asc' };
+      return s.dir === 'asc' ? { ...s, dir: 'desc' } : null;
+    });
+    // Row-index keyed UI state would point at different rows once reordered.
+    setExpanded({});
+    setCollapsedSec({});
+    setDrillPage({});
+  };
+  const onDrillSort = (key) => {
+    setDrillSort((s) => nextSort(s, key));
+    setDrillPage({});
+  };
+  const drillHead = (
+    <thead>
+      <tr className="text-[10px] uppercase tracking-wider text-navy-400">
+        <SortableTh label="Counterparty" sortKey="name" sort={drillSort} onSort={onDrillSort} className="px-3 py-1.5" />
+        <th className="text-left px-3 py-1.5">Ref</th>
+        <SortableTh label="Date" sortKey="date" sort={drillSort} onSort={onDrillSort} className="px-3 py-1.5" />
+        <SortableTh label="Amount" sortKey="amount" align="right" sort={drillSort} onSort={onDrillSort} className="px-3 py-1.5" />
+      </tr>
+    </thead>
+  );
+
+  const headerLabel = (c, ci) => {
+    const kind = sortKindFor(c, ci === 0, baseRows);
+    if (!kind) return c.label;
+    return (
+      <SortHeaderButton
+        label={c.label}
+        active={sortActive && sort.key === c.key}
+        dir={sort?.dir}
+        align={c.align}
+        onClick={() => onSort(c.key, ci === 0, kind)}
+      />
+    );
+  };
 
   // Wide reports (e.g. AR/AP Aging with nine bucket columns) size the table to
   // its content and scroll sideways instead of being squeezed into the panel —
@@ -279,14 +332,7 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                     ci === 0 ? labelWidth : (c.align !== 'right' && textColWidth),
                   )}
                 >
-                  {c.align === 'right' ? (
-                    <span className="inline-flex items-center gap-1 justify-end">
-                      {c.label}
-                      <ChevronsUpDown size={12} className="text-navy-300 dark:text-navy-500" />
-                    </span>
-                  ) : (
-                    c.label
-                  )}
+                  {headerLabel(c, ci)}
                 </th>
               ))}
             </tr>
@@ -429,7 +475,7 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                     </tr>
                   )}
                   {r.drill && isExpanded && (() => {
-                    const allDrill = r.drill || [];
+                    const allDrill = sortEntries(r.drill || [], drillSort, DRILL_SORT_KINDS);
                     const drillTotalPages = Math.max(1, Math.ceil(allDrill.length / DRILL_PAGE_SIZE));
                     const drillPg = Math.min(drillPage[i] || 0, drillTotalPages - 1);
                     const drillStart = drillPg * DRILL_PAGE_SIZE;
@@ -446,14 +492,7 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                             )} />
                           </div>
                           <table className="w-full text-[11.5px]">
-                            <thead>
-                              <tr className="text-[10px] uppercase tracking-wider text-navy-400">
-                                <th className="text-left px-3 py-1.5">Counterparty</th>
-                                <th className="text-left px-3 py-1.5">Ref</th>
-                                <th className="text-left px-3 py-1.5">Date</th>
-                                <th className="text-right px-3 py-1.5">Amount</th>
-                              </tr>
-                            </thead>
+                            {drillHead}
                             <tbody>
                               {drillSlice.map((d, di) => {
                                 const drillToSource = !!(d.sourceType && d.sourceRef);
@@ -533,7 +572,7 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                   ci === 0 ? labelWidth : (c.align !== 'right' && textColWidth),
                 )}
               >
-                {c.label}
+                {headerLabel(c, ci)}
               </th>
             ))}
           </tr>
@@ -660,16 +699,9 @@ export default function ReportTable({ data, variant = 'standard', asOf = false }
                           )} />
                         </div>
                         <table className="w-full text-[11.5px]">
-                          <thead>
-                            <tr className="text-[10px] uppercase tracking-wider text-navy-400">
-                              <th className="text-left px-3 py-1.5">Counterparty</th>
-                              <th className="text-left px-3 py-1.5">Ref</th>
-                              <th className="text-left px-3 py-1.5">Date</th>
-                              <th className="text-right px-3 py-1.5">Amount</th>
-                            </tr>
-                          </thead>
+                          {drillHead}
                           <tbody>
-                            {r.drill.map((d, di) => {
+                            {sortEntries(r.drill, drillSort, DRILL_SORT_KINDS).map((d, di) => {
                               const drillToSource = !!(d.sourceType && d.sourceRef);
                               return (
                                 <tr

@@ -4,6 +4,7 @@ import Modal from '../ui/Modal.jsx';
 import { fmt } from '../../utils/fmt.js';
 import { exportRowsCSV, exportRowsXLSX } from '../../utils/exportReport.js';
 import { cn } from '../../utils/classNames.js';
+import SortableTh, { useSortedEntries } from './SortableTh.jsx';
 
 // Generic "how was this amount calculated" popup — the modal counterpart of
 // the inline breakdown/drill panels elsewhere in ReportTable.jsx, used where
@@ -12,6 +13,7 @@ import { cn } from '../../utils/classNames.js';
 // `entries` is the same {name, ref, date, type, txnAmount, amount} shape the
 // inline panels already use — nothing new for the backend to produce.
 const PAGE_SIZE = 15;
+const SORT_KINDS = { name: 'name', date: 'date', amount: 'amount' };
 
 function formatCell(value, decimals, currency, locale) {
   if (value == null || value === '') return '';
@@ -23,15 +25,17 @@ export default function BreakdownModal({
   open, onClose, title, subtitle, entries = [], currency = 'USD', decimals = 2, numLocale,
 }) {
   const [page, setPage] = useState(0);
+  const { sorted, sort, toggle, reset } = useSortedEntries(entries, SORT_KINDS);
+  const onSort = (key) => { toggle(key); setPage(0); };
 
   const hasType = entries.some((e) => e.type != null);
   const hasTxnAmount = entries.some((e) => e.txnAmount != null);
   const totalPages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
   const pg = Math.min(page, totalPages - 1);
   const start = pg * PAGE_SIZE;
-  const slice = entries.slice(start, start + PAGE_SIZE);
+  const slice = sorted.slice(start, start + PAGE_SIZE);
 
-  const handleClose = () => { setPage(0); onClose?.(); };
+  const handleClose = () => { setPage(0); reset(); onClose?.(); };
 
   // Ledger-style entries (they carry the posting account) get a fuller layout:
   // description, account, reference and type side by side. Every other caller
@@ -40,9 +44,9 @@ export default function BreakdownModal({
   if (ledgerStyle) {
     return (
       <LedgerBreakdown
-        open={open} onClose={handleClose} title={title} subtitle={subtitle} entries={entries}
+        open={open} onClose={handleClose} title={title} subtitle={subtitle} entries={sorted}
         page={pg} setPage={setPage} totalPages={totalPages} start={start} slice={slice}
-        decimals={decimals} currency={currency} numLocale={numLocale}
+        decimals={decimals} currency={currency} numLocale={numLocale} sort={sort} onSort={onSort}
       />
     );
   }
@@ -90,13 +94,13 @@ export default function BreakdownModal({
           <table className="w-full border-collapse text-[12.5px]">
             <thead>
               <tr className="border-b-2 border-navy-200 dark:border-navy-700">
-                <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Counterparty</th>
+                <SortableTh label="Counterparty" sortKey="name" sort={sort} onSort={onSort} className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300" />
                 <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">{hasType ? 'Type' : 'Ref'}</th>
-                <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Date</th>
+                <SortableTh label="Date" sortKey="date" sort={sort} onSort={onSort} className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300" />
                 {hasTxnAmount && (
                   <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-right text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Txn Amount</th>
                 )}
-                <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-right text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Amount</th>
+                <SortableTh label="Amount" sortKey="amount" align="right" sort={sort} onSort={onSort} className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-4 py-2 text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300" />
               </tr>
             </thead>
             <tbody>
@@ -173,6 +177,7 @@ const TH = 'sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-[10.5px] 
 
 function LedgerBreakdown({
   open, onClose, title, subtitle, entries, page, setPage, totalPages, start, slice, decimals, currency, numLocale,
+  sort, onSort,
 }) {
   const total = Math.round(entries.reduce((s, e) => s + (Number(e.amount) || 0), 0) * 100) / 100;
   const headers = ['Date', 'Description', 'Account', 'Reference', 'Type', 'Amount'];
@@ -211,12 +216,12 @@ function LedgerBreakdown({
         <table className="w-full border-collapse text-[12.5px]">
           <thead>
             <tr className="border-b-2 border-navy-200 dark:border-navy-700">
-              <th className={cn(TH, 'text-left')}>Date</th>
-              <th className={cn(TH, 'text-left')}>Description</th>
+              <SortableTh label="Date" sortKey="date" sort={sort} onSort={onSort} className={TH} />
+              <SortableTh label="Description" sortKey="name" sort={sort} onSort={onSort} className={TH} />
               <th className={cn(TH, 'text-left')}>Account</th>
               <th className={cn(TH, 'text-left')}>Reference</th>
               <th className={cn(TH, 'text-left')}>Type</th>
-              <th className={cn(TH, 'text-right')}>Amount</th>
+              <SortableTh label="Amount" sortKey="amount" align="right" sort={sort} onSort={onSort} className={TH} />
             </tr>
           </thead>
           <tbody>

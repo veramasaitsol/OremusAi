@@ -5,6 +5,7 @@ import axiosClient from '../../services/axiosClient.js';
 import { fmt } from '../../utils/fmt.js';
 import { exportRowsCSV, exportRowsXLSX } from '../../utils/exportReport.js';
 import SourceDocumentModal from './SourceDocumentModal.jsx';
+import SortableTh, { useSortedEntries } from './SortableTh.jsx';
 
 // Report → Account drill: one account's General Ledger from the posted
 // double-entry lines, with a running balance. Each row drills further to its
@@ -13,6 +14,10 @@ function money(v, currency) {
   if (v == null || v === 0) return '';
   return fmt(Number(v), { dec: 2, currency });
 }
+
+// Sortable ledger columns; Balance is a running total so it keeps posting order.
+const SORT_KINDS = { date: 'date', name: 'name', debit: 'amount', credit: 'amount' };
+const TH = 'sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300';
 
 export default function AccountLedgerModal({
   open, onClose, accountRef, accountName, currency = 'USD', from, to, asOf = false,
@@ -42,6 +47,11 @@ export default function AccountLedgerModal({
   const cur = data?.currency || currency;
   const ledger = data?.ledger || [];
   const totals = data?.totals;
+  // The Beginning Balance line stays first whatever the sort.
+  const { sorted: sortedLines, sort, toggle } = useSortedEntries(
+    ledger.filter((r) => !r.isOpening), SORT_KINDS,
+  );
+  const shownLedger = [...ledger.filter((r) => r.isOpening), ...sortedLines];
 
   // Export every line (not just what's on screen) with the original-currency
   // amount and rate beside the base-currency figures, so a difference against
@@ -127,17 +137,17 @@ export default function AccountLedgerModal({
             <table className="w-full border-collapse text-[12.5px]">
               <thead>
                 <tr className="border-b-2 border-navy-200 dark:border-navy-700">
-                  <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Date</th>
+                  <SortableTh label="Date" sortKey="date" sort={sort} onSort={toggle} className={TH} />
                   <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Transaction</th>
                   <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Num</th>
-                  <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-left text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Name</th>
-                  <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-right text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Debit</th>
-                  <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-right text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Credit</th>
+                  <SortableTh label="Name" sortKey="name" sort={sort} onSort={toggle} className={TH} />
+                  <SortableTh label="Debit" sortKey="debit" align="right" sort={sort} onSort={toggle} className={TH} />
+                  <SortableTh label="Credit" sortKey="credit" align="right" sort={sort} onSort={toggle} className={TH} />
                   <th className="sticky top-0 z-10 bg-white dark:bg-navy-950 px-3 py-2 text-right text-[10.5px] font-semibold uppercase tracking-wider text-navy-500 dark:text-navy-300">Balance</th>
                 </tr>
               </thead>
               <tbody>
-                {ledger.map((r, i) => {
+                {shownLedger.map((r, i) => {
                   const drillable = !!(r.sourceType && r.sourceRef);
                   return (
                     <tr

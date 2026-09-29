@@ -15,6 +15,7 @@
 const pool = require('../config/db');
 const { attachAsOfBalances } = require('./salesArFromInvoicesService');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
+const { invoiceFxContext, rateToBase, convertInvoicesToBase } = require('./invoiceFx');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute(
@@ -128,13 +129,11 @@ async function buildArAgingDetail(userId, params = {}) {
   await attachAsOfBalances(invoices, userId, orgId, asOf);
   // total/_balanceAsOf are still native to each invoice's own currency at this
   // point — attachAsOfBalances' payment/credit-note rewinding runs entirely in
-  // that native currency. Convert to the org's base currency only now, so both
-  // the displayed row and every bucket subtotal/grand total below agree.
-  for (const inv of invoices) {
-    const rate = num(inv.exchange_rate) || 1;
-    inv.total = round2(inv.total * rate);
-    inv._balanceAsOf = round2(inv._balanceAsOf * rate);
-  }
+  // that native currency. Convert to the org's base currency only now, at each
+  // invoice's own booked rate (invoices.exchange_rate), so both the displayed
+  // row and every bucket subtotal/grand total below agree.
+  const fx = await invoiceFxContext(orgId);
+  convertInvoicesToBase(invoices, fx);
 
   // Always the org's base/reporting currency, never a per-invoice code — every
   // amount here is already converted to it, so a multi-currency org's totals
@@ -155,7 +154,7 @@ async function buildArAgingDetail(userId, params = {}) {
   // only synthetic (non-Zoho) payment rows qualify: real Zoho payment ids are
   // bare numeric strings, while ours are prefixed `qbo:`/`xero:` (contain ':').
   const [creditPayments] = await pool.execute(
-    `SELECT customer_name, date, amount, unused_amount, exchange_rate
+    `SELECT customer_name, date, amount, unused_amount, exchange_rate, currency_code
        FROM zb_customer_payments
       WHERE user_id = ? AND org_id = ? AND date <= ? AND unused_amount <> 0
         AND zoho_payment_id LIKE '%:%'`,
@@ -163,7 +162,7 @@ async function buildArAgingDetail(userId, params = {}) {
   );
   for (const p of creditPayments) {
     // The payment's own rate — it isn't necessarily tied to any one invoice.
-    const rate = num(p.exchange_rate) || 1;
+    const rate = rateToBase(p.currency_code, p.exchange_rate, fx);
     invoices.push({
       invoice_number: '',
       customer_name: p.customer_name,

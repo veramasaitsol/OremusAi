@@ -22,6 +22,7 @@ import {
 import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { cn } from '../../utils/classNames.js';
+import { useReportSort } from './useReportSort.jsx';
 import { fmt } from '../../utils/fmt.js';
 
 const XERO_BLUE = '#1A73E8';
@@ -96,7 +97,7 @@ export default function InventoryItemSummaryViewer() {
   const allCols = data?.columns || [];
   const cols = allCols.filter((c) => !hiddenCols[c.key]);
   const labelKey = allCols[0]?.key || 'label';
-  const rows = data?.rows || [];
+  const { rows, header } = useReportSort(data?.rows || []);
   const rowPad = 'py-1.5';
 
   const toggleCol = (key) => setHiddenCols((m) => ({ ...m, [key]: !m[key] }));
@@ -296,7 +297,7 @@ export default function InventoryItemSummaryViewer() {
                     <tr className="text-[12px] text-navy-500 dark:text-navy-400">
                       {cols.map((c) => (
                         <th key={c.key} className={cn('sticky top-0 z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 font-semibold py-2 px-3 whitespace-nowrap', c.align === 'right' ? 'text-right' : 'text-left')}>
-                          {c.label}
+                          {header(c, { isLabel: c.key === labelKey })}
                         </th>
                       ))}
                     </tr>

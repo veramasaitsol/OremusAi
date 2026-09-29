@@ -18,6 +18,7 @@ import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { useReportSort } from './useReportSort.jsx';
 
 const XERO_BLUE = '#1A73E8';
 
@@ -72,7 +73,8 @@ export default function ForeignCurrencyGainsViewer() {
 
   const cols = data?.columns || [];
   const valueCols = cols.filter((c) => c.key !== 'label');
-  const rows = data?.rows || [];
+  const labelCol = cols.find((c) => c.key === 'label') || { key: 'label', label: '' };
+  const { rows, header } = useReportSort(data?.rows || []);
 
   return (
     <>
@@ -163,9 +165,9 @@ export default function ForeignCurrencyGainsViewer() {
               <table className="w-full text-[13px]">
                 <thead>
                   <tr className="text-[12px] text-navy-500 dark:text-navy-400 [&>th]:sticky [&>th]:top-0 [&>th]:z-20 [&>th]:bg-white dark:[&>th]:bg-navy-900 [&>th]:border-b [&>th]:border-navy-200 dark:[&>th]:border-navy-700">
-                    <th className="text-left font-semibold py-2" />
+                    <th className="text-left font-semibold py-2">{header(labelCol, { isLabel: true })}</th>
                     {valueCols.map((c) => (
-                      <th key={c.key} className="text-right font-semibold py-2 px-3 whitespace-nowrap">{c.label}</th>
+                      <th key={c.key} className="text-right font-semibold py-2 px-3 whitespace-nowrap">{header({ align: 'right', ...c })}</th>
                     ))}
                   </tr>
                 </thead>

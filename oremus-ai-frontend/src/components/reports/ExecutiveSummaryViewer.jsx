@@ -22,6 +22,7 @@ import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { useReportSort } from './useReportSort.jsx';
 import DrillDownModal from './DrillDownModal.jsx';
 import { breakdownToSheet, exportSheetsXLSX } from '../../utils/exportReport.js';
 
@@ -238,6 +239,7 @@ export default function ExecutiveSummaryViewer() {
     }
     return out;
   }, [rows, hidden]);
+  const { rows: shownRows, header } = useReportSort(visibleRows);
 
   const toggleHidden = (label) => setHidden((prev) => {
     const next = new Set(prev);
@@ -527,14 +529,14 @@ export default function ExecutiveSummaryViewer() {
               <table className="w-full text-[13px]">
                 <thead>
                   <tr className="text-[12px] text-navy-500 dark:text-navy-400 [&>th]:sticky [&>th]:top-0 [&>th]:z-20 [&>th]:bg-white dark:[&>th]:bg-navy-900 [&>th]:border-b [&>th]:border-navy-200 dark:[&>th]:border-navy-700">
-                    <th className="text-left font-semibold py-2" />
+                    <th className="text-left font-semibold py-2">{header({ key: 'label', label: '' }, { isLabel: true })}</th>
                     {valueCols.map((c) => (
-                      <th key={c.key} className="text-right font-semibold py-2 px-3 w-[150px]">{c.label}</th>
+                      <th key={c.key} className="text-right font-semibold py-2 px-3 w-[150px]">{header({ align: 'right', ...c })}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleRows.map((r, i) => {
+                  {shownRows.map((r, i) => {
                     if (r.isHeader) {
                       return (
                         <tr key={i}>

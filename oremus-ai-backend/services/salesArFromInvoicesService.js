@@ -24,6 +24,7 @@
  */
 
 const pool = require('../config/db');
+const { invoiceFxContext, rateToBase, convertInvoicesToBase, toBase } = require('./invoiceFx');
 
 // Sales-document source_type codes, by platform. Each connected org belongs to
 // exactly one platform, so one combined IN-list works everywhere with no
@@ -305,20 +306,25 @@ async function buildSalesByCustomer(userId, params = {}) {
   let grouped = txnGrouped;
   let fx = new Map();
   if (!grouped.length) {
-    const [invGrouped] = await pool.execute(
+    // Per invoice, so each converts at its own booked rate before grouping.
+    const [invRows] = await pool.execute(
       `SELECT COALESCE(NULLIF(TRIM(customer_name), ''), 'Unknown') AS customer,
-              COUNT(*)    AS cnt,
-              SUM(total)  AS total,
-              MAX(currency_code) AS currency
+              total, currency_code, exchange_rate
          FROM invoices
         WHERE user_id = ? AND org_id = ?
           AND date BETWEEN ? AND ?
-          AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'approved', 'void')
-        GROUP BY customer
-        ORDER BY total DESC`,
+          AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'approved', 'void')`,
       [userId, orgId, from, to]
     );
-    grouped = invGrouped;
+    const invFx = await invoiceFxContext(orgId);
+    const byCust = new Map();
+    for (const r of invRows) {
+      const g = byCust.get(r.customer) || { customer: r.customer, cnt: 0, total: 0, currency: invFx.base };
+      g.cnt += 1;
+      g.total = round2(g.total + toBase(r.total, r, invFx));
+      byCust.set(r.customer, g);
+    }
+    grouped = [...byCust.values()].sort((x, y) => y.total - x.total);
   } else {
     fx = await fxAdjustmentsByCustomer(userId, orgId, from, to);
   }
@@ -437,7 +443,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
               '' AS description,
               ROUND(total, 2) AS amount,
               ROUND(tax_total, 2) AS tax_total,
-              currency_code,
+              currency_code, exchange_rate,
               'ACCREC' AS source_type
          FROM invoices
         WHERE user_id = ? AND org_id = ?
@@ -446,7 +452,14 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
         ORDER BY customer_name, date, invoice_number`,
       [userId, orgId, from, to]
     );
-    invoiceRows = invRows;
+    const fbFx = await invoiceFxContext(orgId);
+    invoiceRows = invRows.map((r) => ({
+      ...r,
+      amount: toBase(r.amount, r, fbFx),
+      tax_total: toBase(r.tax_total, r, fbFx),
+      currency_code: fbFx.base,
+      _lineRate: rateToBase(r.currency_code, r.exchange_rate, fbFx),
+    }));
   }
 
   // Also pull Zoho line items for richer detail (product/qty/price).
@@ -471,7 +484,21 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
     }
   }
 
-  const currency = allRows.find((r) => r.currency_code)?.currency_code || 'INR';
+  const currency = (await invoiceFxContext(orgId)).base;
+
+  // Line items carry the invoice's own currency. Ledger rows are already in the
+  // base currency, so their lines take the invoice's booked rate from `invoices`.
+  const lineRate = new Map();
+  if (txnRows.length && linesByInvoice.size) {
+    const ids = [...linesByInvoice.keys()];
+    const [invRates] = await pool.execute(
+      `SELECT zoho_id, currency_code, exchange_rate FROM invoices
+        WHERE user_id = ? AND org_id = ? AND zoho_id IN (${ids.map(() => '?').join(',')})`,
+      [userId, orgId, ...ids]
+    );
+    const ctx = await invoiceFxContext(orgId);
+    for (const r of invRates) lineRate.set(String(r.zoho_id), rateToBase(r.currency_code, r.exchange_rate, ctx));
+  }
 
   // customer → array of detail entries (already in chronological order).
   const groups = new Map();
@@ -491,13 +518,14 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
       // fallback rows carry tax_total, so GL-driven rows (Xero/QuickBooks) and
       // lines that already carry their own tax are left untouched.
       const invTax = num(row.tax_total);
-      const lineTaxSum = lines.reduce((s, ln) => s + num(ln.tax_amount), 0);
+      const m = row._lineRate ?? lineRate.get(String(row.source_id)) ?? 1;
+      const lineTaxSum = lines.reduce((s, ln) => s + num(ln.tax_amount) * m, 0);
       const spread = invTax !== 0 && round2(lineTaxSum) === 0;
-      const absSum = lines.reduce((s, ln) => s + Math.abs(num(ln.item_total)), 0);
+      const absSum = lines.reduce((s, ln) => s + Math.abs(num(ln.item_total) * m), 0);
       let taxLeft = spread ? invTax : 0;
       lines.forEach((ln, idx) => {
         const sign = isCreditNoteType(row.source_type) ? -1 : 1;
-        const base = num(ln.item_total);
+        const base = round2(num(ln.item_total) * m);
         let taxPart = 0;
         if (spread) {
           taxPart = idx === lines.length - 1 ? taxLeft
@@ -511,7 +539,7 @@ async function buildSalesByCustomerDetail(userId, params = {}) {
           product: ln.product || '',
           desc:    ln.description || '',
           qty:     num(ln.quantity),
-          price:   num(ln.rate),
+          price:   round2(num(ln.rate) * m),
           amount:  round2(sign * base + (sign > 0 ? taxPart : -taxPart)),
         });
       });
@@ -649,7 +677,7 @@ async function buildSalesByProductSummary(userId, params = {}) {
   const [invoices] = await pool.execute(
     `SELECT zoho_id, invoice_number, customer_name,
             DATE_FORMAT(date, '%Y-%m-%d') AS d, total, ROUND(tax_total, 2) AS tax_total,
-            currency_code
+            currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
         AND date BETWEEN ? AND ?
@@ -676,7 +704,10 @@ async function buildSalesByProductSummary(userId, params = {}) {
     }
   }
 
-  const currency = invoices.find((r) => r.currency_code)?.currency_code || 'INR';
+  // Line amounts are in each invoice's own currency — report them in the org's
+  // base currency at the invoice's booked rate (invoices.exchange_rate).
+  const invFx = await invoiceFxContext(orgId);
+  const currency = invFx.base;
 
   // product → { qty, amount, hasQty, entries[] }. entries feed the inline
   // drill-down: each underlying invoice line (customer / invoice# / date /
@@ -718,6 +749,7 @@ async function buildSalesByProductSummary(userId, params = {}) {
         taxLeft = round2(taxLeft - taxPart);
         amount = round2(amount + taxPart);
       }
+      amount = toBase(amount, inv, invFx);
       add(ln.product, ln.quantity, amount, { ...entryBase, amount });
     });
   }
@@ -849,7 +881,7 @@ async function buildArAgingSummary(userId, params = {}) {
   // Statuses excluded are the non-receivable ones across all three providers:
   // Zoho draft/void, Xero DRAFT/SUBMITTED/VOIDED/DELETED, QuickBooks drafts.
   const [invoices] = await pool.execute(
-    `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code
+    `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
         AND date <= ?
@@ -858,8 +890,12 @@ async function buildArAgingSummary(userId, params = {}) {
   );
 
   await attachAsOfBalances(invoices, userId, orgId, asOf);
+  // The rewind above runs in each invoice's own currency; convert to the org's
+  // base currency at the invoice's booked rate (invoices.exchange_rate).
+  const fx = await invoiceFxContext(orgId);
+  convertInvoicesToBase(invoices, fx);
 
-  const currency = invoices.find((r) => r.currency_code)?.currency_code || 'INR';
+  const currency = fx.base;
 
   const columns = [
     { key: 'customer', label: 'Customer Name', align: 'left'  },
@@ -910,14 +946,14 @@ async function buildArAgingSummary(userId, params = {}) {
   // (proven — see zohoArAgingDetailService.js), so only synthetic (non-Zoho)
   // payment rows qualify: real Zoho ids are bare numeric, ours are `qbo:`/`xero:`.
   const [creditPayments] = await pool.execute(
-    `SELECT customer_name, date, unused_amount
+    `SELECT customer_name, date, unused_amount, currency_code, exchange_rate
        FROM zb_customer_payments
       WHERE user_id = ? AND org_id = ? AND date <= ? AND unused_amount <> 0
         AND zoho_payment_id LIKE '%:%'`,
     [userId, orgId, ymd(asOf)]
   );
   for (const p of creditPayments) {
-    const credit = -num(p.unused_amount);
+    const credit = round2(-num(p.unused_amount) * rateToBase(p.currency_code, p.exchange_rate, fx));
     const age = daysBetween(asOf, new Date(p.date));
     const bucket = bucketFor(age);
     const customer = (p.customer_name || '').trim() || 'Unknown';

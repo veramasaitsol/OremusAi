@@ -37,6 +37,7 @@
  */
 
 const pool = require('../config/db');
+const { invoiceFxContext } = require('./invoiceFx');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -78,10 +79,14 @@ async function buildInventoryItemSummary(userId, params = {}) {
   );
 
   // Sold: quantity and value inside the period, quantity before it.
+  // Sale value in the base currency, at each invoice's booked rate.
+  const fx = await invoiceFxContext(orgId);
+  const rateSql = `CASE WHEN COALESCE(i.currency_code, '') IN ('', ?) OR COALESCE(i.exchange_rate, 0) <= 0 THEN 1
+                        ELSE ${fx.divide ? '1 / i.exchange_rate' : 'i.exchange_rate'} END`;
   const [sold] = await pool.execute(
     `SELECT li.zoho_item_id AS id, MIN(li.item_name) AS name,
             SUM(CASE WHEN i.date BETWEEN ? AND ? THEN li.quantity   ELSE 0 END) AS qty,
-            SUM(CASE WHEN i.date BETWEEN ? AND ? THEN li.item_total ELSE 0 END) AS value,
+            SUM(CASE WHEN i.date BETWEEN ? AND ? THEN li.item_total * ${rateSql} ELSE 0 END) AS value,
             SUM(CASE WHEN i.date < ? THEN li.quantity ELSE 0 END)               AS priorQty
        FROM zb_invoice_line_items li
        JOIN invoices i
@@ -93,7 +98,7 @@ async function buildInventoryItemSummary(userId, params = {}) {
         AND COALESCE(li.zoho_item_id, '') <> ''
         AND li.zoho_item_id NOT LIKE '%:l:%'
       GROUP BY li.zoho_item_id`,
-    [from, to, from, to, from, userId, orgId, to]
+    [from, to, from, to, fx.base, from, userId, orgId, to]
   );
 
   // Bought: the same, off the bills.

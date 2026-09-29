@@ -3,6 +3,9 @@ import { X, FileText, Loader2 } from 'lucide-react';
 import Modal from '../ui/Modal.jsx';
 import axiosClient from '../../services/axiosClient.js';
 import { fmt } from '../../utils/fmt.js';
+import SortableTh, { useSortedEntries } from './SortableTh.jsx';
+
+const SORT_KINDS = { itemLabel: 'name', amount: 'amount' };
 
 // Drill-down leaf: the full source document behind a ledger entry
 // (Invoice / Bill / Payment / Journal Entry, …). Reached from
@@ -61,7 +64,9 @@ export default function SourceDocumentModal({ open, onClose, sourceType, sourceR
   const payload = doc?.payload || {};
   const lines = Array.isArray(payload.Line)
     ? payload.Line.filter((l) => l.DetailType !== 'SubTotalLineDetail').map(readLine)
+      .map((l) => ({ ...l, itemLabel: l.description || l.name || '' }))
     : [];
+  const { sorted: shownLines, sort, toggle } = useSortedEntries(lines, SORT_KINDS);
 
   return (
     <Modal open={open} onClose={onClose} size="lg">
@@ -122,14 +127,14 @@ export default function SourceDocumentModal({ open, onClose, sourceType, sourceR
                 <table className="w-full text-[12px]">
                   <thead>
                     <tr className="bg-navy-50 dark:bg-navy-900/60 text-[10px] uppercase tracking-wider text-navy-400">
-                      <th className="text-left px-3 py-2">Item / Description</th>
+                      <SortableTh label="Item / Description" sortKey="itemLabel" sort={sort} onSort={toggle} className="px-3 py-2" />
                       <th className="text-right px-3 py-2">Qty</th>
                       <th className="text-right px-3 py-2">Rate</th>
-                      <th className="text-right px-3 py-2">Amount</th>
+                      <SortableTh label="Amount" sortKey="amount" align="right" sort={sort} onSort={toggle} className="px-3 py-2" />
                     </tr>
                   </thead>
                   <tbody>
-                    {lines.map((l, i) => (
+                    {shownLines.map((l, i) => (
                       <tr key={i} className="border-t border-navy-100 dark:border-navy-800">
                         <td className="px-3 py-2 text-navy-700 dark:text-navy-200">
                           {l.description || l.name || '—'}

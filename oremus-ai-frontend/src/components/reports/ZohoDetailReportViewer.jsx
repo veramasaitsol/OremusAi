@@ -28,6 +28,7 @@ import { selectActiveClient } from '../../features/clients/clientsSlice.js';
 import { resolvePresetRange } from '../../features/reports/data/dateRanges.js';
 import { fmt } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
+import { useReportSort } from './useReportSort.jsx';
 import { exportRowsCSV } from '../../utils/exportReport.js';
 
 const ZOHO_BLUE = '#2563eb';
@@ -71,7 +72,6 @@ export default function ZohoDetailReportViewer() {
   const loading = status === 'loading';
   const zoho = data?.zoho || {};
   const columns = data?.columns || [];
-  const rows = data?.rows || [];
   const currency = data?.currency || 'USD';
 
   const [reportBy, setReportBy] = useState(zoho.reportBy?.value || '');
@@ -79,6 +79,10 @@ export default function ZohoDetailReportViewer() {
   const [expanded, setExpanded] = useState({});
   // Current page (0-based) of each expanded breakdown, keyed by row index.
   const [bdPage, setBdPage] = useState({});
+  // Sorting reorders rows, so row-index keyed expansion state resets with it.
+  const { rows, header } = useReportSort(data?.rows || [], {
+    onChange: () => { setExpanded({}); setBdPage({}); },
+  });
   const toggleRow = (i) => {
     setExpanded((e) => ({ ...e, [i]: !e[i] }));
     // Re-opening a breakdown always lands on its first page.
@@ -266,7 +270,7 @@ export default function ZohoDetailReportViewer() {
                   <thead>
                     <tr className="text-[11.5px] uppercase tracking-wide text-navy-500 dark:text-navy-400">
                       {columns.map((c) => (
-                        <th key={c.key} className={cn('sticky top-0 z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 font-semibold py-2.5 px-4 whitespace-nowrap', c.align === 'right' ? 'text-right' : 'text-left')}>{c.label}</th>
+                        <th key={c.key} className={cn('sticky top-0 z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 font-semibold py-2.5 px-4 whitespace-nowrap', c.align === 'right' ? 'text-right' : 'text-left')}>{header(c, { isLabel: c.key === columns[0].key })}</th>
                       ))}
                     </tr>
                   </thead>
