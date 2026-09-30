@@ -773,6 +773,7 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
       vendor: displayName.get(canon),
       date: doc.date,
       amount: -round2(amount),
+      total: -round2(doc.amount), // the document's full amount (amount = its open part)
       type: doc.type,
       docNumber: doc.ref,
       ref: [doc.type, doc.ref].filter(Boolean).join(' '),
@@ -780,6 +781,16 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
   };
   const newestFirst = (a, b) => new Date(b.date) - new Date(a.date);
   const needing = () => [...gap].filter(([, g]) => g < -0.005).sort((a, b) => a[1] - b[1]);
+
+  // A single document of exactly the unapplied amount is that document — take
+  // it whole before splitting anything (vendor's own documents first, then one
+  // with no vendor name), so an unrelated larger journal is never sliced up.
+  for (const [canon] of needing()) {
+    const need = -gap.get(canon);
+    const exact = (vendorDocs.get(canon) || []).filter((d) => Math.abs(d.left - need) < 0.005).sort(newestFirst)[0]
+      || unattributed.find((d) => d.left === d.amount && Math.abs(d.amount - need) < 0.005);
+    if (exact) takeFrom(canon, exact, need);
+  }
 
   for (const [canon] of needing()) {
     for (const doc of (vendorDocs.get(canon) || []).filter((d) => !/payment/i.test(d.type)).sort(newestFirst)) {

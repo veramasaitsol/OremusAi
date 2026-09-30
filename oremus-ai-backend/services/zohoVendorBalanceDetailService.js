@@ -94,6 +94,13 @@ async function buildVendorBalanceDetail(userId, params = {}) {
 
   const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
 
+  // QuickBooks' own layout: Amount (the transaction), Open balance (what's
+  // still owed on it) and Balance (the vendor's running total of open balances
+  // in date order). Other platforms keep the single per-document Balance.
+  const [[qbo]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
+    .catch(() => [[null]]);
+  if (qbo) return buildQboLayout(bills, userId, orgId, asOf, fromDate, currency);
+
   const columns = [
     { key: 'label',   label: 'Date',             align: 'left'  },
     { key: 'txnType', label: 'Transaction type', align: 'left'  },
@@ -200,6 +207,110 @@ async function buildVendorBalanceDetail(userId, params = {}) {
       asOf: fmtDateUS(asOf),
       from: fromDate ? fmtDateUS(fromDate) : null,
       source: 'warehouse',
+    },
+  };
+}
+
+// ── QuickBooks layout ───────────────────────────────────────────────────────
+// Every transaction still open on the as-of date, per vendor: bills with an
+// open balance, and the unapplied expenses / vendor credits / journal entries /
+// bill payments that debited A/P (see qboVendorReconciliation). Amount is the
+// transaction's full signed value, Open balance its unapplied part, and Balance
+// the running sum of open balances in date order — so each vendor's last
+// Balance is its balance on the as-of date, and the grand total the A/P total.
+async function buildQboLayout(bills, userId, orgId, asOf, fromDate, currency) {
+  const columns = [
+    { key: 'label',   label: 'Date',             align: 'left'  },
+    { key: 'txnType', label: 'Transaction type', align: 'left'  },
+    { key: 'invoice', label: 'Num',              align: 'left'  },
+    { key: 'dueDate', label: 'Due date',         align: 'left'  },
+    { key: 'amount',  label: 'Amount',           align: 'right' },
+    { key: 'open',    label: 'Open balance',     align: 'right' },
+    { key: 'balance', label: 'Balance',          align: 'right' },
+  ];
+
+  const byVendor = new Map();
+  const push = (vendorName, doc) => {
+    const vendor = (vendorName || '').trim() || 'Unknown';
+    if (!byVendor.has(vendor)) byVendor.set(vendor, []);
+    byVendor.get(vendor).push(doc);
+  };
+  const inWindow = (d) => !(d && new Date(d) > asOf) && !(fromDate && d && new Date(d) < fromDate);
+
+  for (const bill of bills) {
+    if (!inWindow(bill.date) || round2(bill._balanceAsOf) === 0) continue;
+    push(bill.vendor_name, {
+      date: bill.date,
+      txnType: 'Bill',
+      num: bill.bill_number || '',
+      dueDate: fmtDateUS(bill.due_date || bill.date),
+      amount: num(bill.total),
+      open: num(bill._balanceAsOf),
+    });
+  }
+  for (const c of await fetchUnallocatedVendorCredits(userId, orgId, asOf)) {
+    if (!inWindow(c.date)) continue;
+    push(c.vendor, {
+      date: c.date,
+      txnType: c.type || 'Vendor Credit',
+      num: c.docNumber || '',
+      dueDate: '',
+      amount: c.total != null ? num(c.total) : num(c.amount),
+      open: num(c.amount),
+    });
+  }
+
+  const ymd = (d) => {
+    const dt = d instanceof Date ? d : new Date(d);
+    return Number.isNaN(dt.getTime()) ? '' : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  };
+  const rows = [];
+  let grandAmount = 0;
+  let grandOpen = 0;
+  for (const vendor of [...byVendor.keys()].sort((a, b) => a.localeCompare(b))) {
+    const docs = byVendor.get(vendor)
+      .map((d, i) => ({ ...d, _i: i }))
+      .sort((a, b) => ymd(a.date).localeCompare(ymd(b.date))
+        || String(a.num).localeCompare(String(b.num), undefined, { numeric: true }) || a._i - b._i);
+    rows.push({ label: vendor, isHeader: true, level: 0, cells: {} });
+    let running = 0;
+    let vendorAmount = 0;
+    for (const d of docs) {
+      running = round2(running + d.open);
+      vendorAmount = round2(vendorAmount + d.amount);
+      rows.push({
+        label: fmtDateUS(d.date),
+        level: 1,
+        cells: {
+          txnType: d.txnType,
+          invoice: d.num,
+          dueDate: d.dueDate,
+          amount: round2(d.amount),
+          open: round2(d.open),
+          balance: running,
+        },
+      });
+    }
+    rows.push({
+      label: `Total for ${vendor}`,
+      isSubtotal: true,
+      level: 0,
+      cells: { amount: vendorAmount, open: running, balance: running },
+    });
+    grandAmount = round2(grandAmount + vendorAmount);
+    grandOpen = round2(grandOpen + running);
+  }
+  rows.push({ label: 'TOTAL', isTotal: true, level: 0, cells: { amount: grandAmount, open: grandOpen, balance: grandOpen } });
+
+  return {
+    columns,
+    rows,
+    currency,
+    meta: {
+      title: 'Vendor Balance Detail Report',
+      asOf: fmtDateUS(asOf),
+      from: fromDate ? fmtDateUS(fromDate) : null,
+      source: 'ledger',
     },
   };
 }
