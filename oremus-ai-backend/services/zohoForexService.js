@@ -204,7 +204,18 @@ const FX_ACCOUNT_LIKE = [
 const isUnrealisedAccount = (name) => /unrealis|unrealiz/i.test(name || '');
 const isPayableSide = (t) => /accpay|bill|vendor|supplier|purchase|payable/i.test(t || '');
 
-async function realisedFromLedger(userId, orgId, base, from, to) {
+async function isQuickBooksOrg(orgId) {
+  const [[r]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
+    .catch(() => [[null]]);
+  return !!r;
+}
+
+// `qbo` = QuickBooks' own "Realized Exchange Gains & Losses" rules: only
+// differences recognised on a settlement or document (a manual Journal Entry
+// to the gain account is not a realised gain), a difference on the document
+// itself (invoice rounding) is in the home currency, and a payment's Realized
+// Amount / rate are the payment's own.
+async function realisedFromLedger(userId, orgId, base, from, to, { qbo = false } = {}) {
   const where = FX_ACCOUNT_LIKE.map(() => 'LOWER(account_name) LIKE ?').join(' OR ');
   const [lines] = await pool.execute(
     `SELECT transaction_date, transaction_type, source_type, source_id,
@@ -221,6 +232,7 @@ async function realisedFromLedger(userId, orgId, base, from, to) {
 
   const rows = lines
     .filter((l) => !isUnrealisedAccount(l.account_name) && (num(l.debit) || num(l.credit)))
+    .filter((l) => !(qbo && /journal/i.test(l.source_type || l.transaction_type || '')))
     .map((l) => ({
       date: l.transaction_date,
       type: l.transaction_type || l.source_type || 'Exchange Difference',
@@ -259,6 +271,30 @@ async function realisedFromLedger(userId, orgId, base, from, to) {
     }
   }
 
+  if (qbo) {
+    for (const r of rows) {
+      if (/invoice|credit memo|bill$/i.test(r.type)) { r.currency = base; r.rate = null; r.amount = null; }
+    }
+    // Payments: the settled amount and rate, from the synced payment itself.
+    const payIds = rows.filter((r) => /payment/i.test(r.type) && r.sourceId).map((r) => `qbo:${r.sourceId}`);
+    if (payIds.length) {
+      const ph = payIds.map(() => '?').join(', ');
+      const [pays] = await pool.execute(
+        `SELECT zoho_payment_id AS id, currency_code, amount, exchange_rate FROM zb_customer_payments
+          WHERE user_id = ? AND org_id = ? AND zoho_payment_id IN (${ph})`,
+        [userId, orgId, ...payIds]
+      ).catch(() => [[]]);
+      const byId = new Map(pays.map((p) => [String(p.id), p]));
+      for (const r of rows) {
+        const p = /payment/i.test(r.type) && byId.get(`qbo:${r.sourceId}`);
+        if (!p) continue;
+        if (p.currency_code) r.currency = p.currency_code;
+        r.rate = num(p.exchange_rate) || null;
+        r.amount = num(p.amount);
+      }
+    }
+  }
+
   rows.forEach((r) => { delete r.sourceId; });
   rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
   return rows;
@@ -272,10 +308,11 @@ async function realisedFromLedger(userId, orgId, base, from, to) {
  * so a Zoho settlement is never counted twice.
  */
 async function resolveRealisedSplit(userId, orgId, base, from, to) {
-  const split = await realisedSplit(userId, orgId, base, from, to);
+  const qbo = await isQuickBooksOrg(orgId);
+  const split = qbo ? { ar: new Map(), ap: new Map() } : await realisedSplit(userId, orgId, base, from, to);
   if (split.ar.size || split.ap.size) return split;
 
-  const ledger = await realisedFromLedger(userId, orgId, base, from, to);
+  const ledger = await realisedFromLedger(userId, orgId, base, from, to, { qbo });
   for (const r of ledger) {
     const target = r.side === 'ap' ? split.ap : split.ar;
     target.set(r.currency, (target.get(r.currency) || 0) + r.gainloss);
@@ -349,8 +386,11 @@ async function buildRealisedForex(userId, params = {}) {
   // source; where a provider's sync stores none (QuickBooks, Xero) the
   // platform's own exchange-difference account answers instead. Exactly one
   // source is used, so a settlement is never reported twice.
-  let data = await realisedTransactions(userId, orgId, base, from, to);
-  if (!data.length) data = await realisedFromLedger(userId, orgId, base, from, to);
+  // QuickBooks' synced payments carry base = amount × rate (no difference), so
+  // its realised gains come only from the Exchange Gain or Loss postings.
+  const qbo = await isQuickBooksOrg(orgId);
+  let data = qbo ? [] : await realisedTransactions(userId, orgId, base, from, to);
+  if (!data.length) data = await realisedFromLedger(userId, orgId, base, from, to, { qbo });
 
   const columns = [
     { key: 'label',    label: 'Date',             align: 'left'  },

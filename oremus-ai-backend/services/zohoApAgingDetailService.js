@@ -719,6 +719,7 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
     const doc = {
       type, date: d.doc_date, amount: round2(-net), left: round2(-net),
       ref: String(d.reference_number || '').trim(),
+      key: `${type}|${sid}|${String(d.transaction_details || '').trim()}`,
     };
     if (!canon) unattributed.push(doc);
     else {
@@ -744,6 +745,40 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
     if (Math.abs(g) > 0.005) gap.set(canon, g);
   }
 
+  const items = [];
+  const takeFrom = (canon, doc, amount) => {
+    doc.left = round2(doc.left - amount);
+    gap.set(canon, round2((gap.get(canon) || 0) + amount));
+    items.push({
+      vendor: displayName.get(canon),
+      date: doc.date,
+      amount: -round2(amount),
+      total: -round2(doc.amount), // the document's full amount (amount = its open part)
+      type: doc.type,
+      docNumber: doc.ref,
+      ref: [doc.type, doc.ref].filter(Boolean).join(' '),
+      key: doc.key,
+      canon,
+    });
+  };
+
+  // A credit still unapplied TODAY was unapplied on every earlier date after it
+  // was issued (applications don't reverse). So for a past as-of date, every
+  // document open today and dated on or before it is listed at its open amount
+  // today first — the same documents QuickBooks shows — and only what's left
+  // is explained by bills paid, or credits applied, after the as-of date.
+  if (asOf.getFullYear() < 9999) {
+    const today = await qboVendorReconciliation(userId, orgId, new Date(9999, 11, 31));
+    const byKey = new Map();
+    for (const list of vendorDocs.values()) for (const d of list) byKey.set(d.key, d);
+    for (const d of unattributed) byKey.set(d.key, d);
+    for (const it of today.items) {
+      const doc = it.key && byKey.get(it.key);
+      if (!doc || !it.canon) continue; // dated after the as-of date
+      takeFrom(it.canon, doc, Math.min(doc.left, -it.amount));
+    }
+  }
+
   // Owed more than the open bills → bills paid after the as-of date. Restore
   // them newest-first (payments settle the oldest bills first).
   const billExtra = new Map();
@@ -765,20 +800,6 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
   // Owed less than the open bills → unapplied debits. Take the vendor's own
   // expenses / credits / journals first, then a journal or credit with no
   // vendor name that matches the amount, then its bill payments.
-  const items = [];
-  const takeFrom = (canon, doc, amount) => {
-    doc.left = round2(doc.left - amount);
-    gap.set(canon, round2(gap.get(canon) + amount));
-    items.push({
-      vendor: displayName.get(canon),
-      date: doc.date,
-      amount: -round2(amount),
-      total: -round2(doc.amount), // the document's full amount (amount = its open part)
-      type: doc.type,
-      docNumber: doc.ref,
-      ref: [doc.type, doc.ref].filter(Boolean).join(' '),
-    });
-  };
   const newestFirst = (a, b) => new Date(b.date) - new Date(a.date);
   const needing = () => [...gap].filter(([, g]) => g < -0.005).sort((a, b) => a[1] - b[1]);
 
