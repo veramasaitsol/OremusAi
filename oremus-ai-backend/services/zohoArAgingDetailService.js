@@ -16,6 +16,7 @@ const pool = require('../config/db');
 const { attachAsOfBalances } = require('./salesArFromInvoicesService');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
 const { invoiceFxContext, rateToBase, convertInvoicesToBase } = require('./invoiceFx');
+const { qboUnappliedArCredits } = require('./qboArReconciliation');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute(
@@ -174,6 +175,21 @@ async function buildArAgingDetail(userId, params = {}) {
     });
   }
 
+  // QuickBooks: unapplied Credit Memos / Journal Entries / Deposits against A/R
+  // (see qboArReconciliation) — negative lines aged by their own date.
+  for (const c of await qboUnappliedArCredits(userId, orgId, asOf)) {
+    invoices.push({
+      invoice_number: c.docNumber || '',
+      customer_name: c.customer,
+      date: c.date,
+      due_date: c.date,
+      total: c.total,
+      _balanceAsOf: c.amount,
+      _isPayment: true,
+      _txnType: c.type,
+    });
+  }
+
   const columns = [
     { key: 'date',     label: 'Date',             align: 'left'  },
     { key: 'txnType',  label: 'Transaction type', align: 'left'  },
@@ -232,7 +248,7 @@ async function buildArAgingDetail(userId, params = {}) {
         label: fmtDate(inv.date),
         level: 1,
         cells: {
-          txnType:  inv._isPayment ? 'Payment' : 'Invoice',
+          txnType:  inv._txnType || (inv._isPayment ? 'Payment' : 'Invoice'),
           invoice:  inv.invoice_number || '',
           customer: inv.customer_name || '',
           dueDate:  fmtDate(inv.due_date || inv.date),

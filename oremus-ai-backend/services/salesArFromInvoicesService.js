@@ -25,6 +25,7 @@
 
 const pool = require('../config/db');
 const { invoiceFxContext, rateToBase, convertInvoicesToBase, toBase } = require('./invoiceFx');
+const { qboUnappliedArCredits } = require('./qboArReconciliation');
 
 // Sales-document source_type codes, by platform. Each connected org belongs to
 // exactly one platform, so one combined IN-list works everywhere with no
@@ -965,6 +966,23 @@ async function buildArAgingSummary(userId, params = {}) {
     grandTotal += credit;
     drillFor(customer, bucket.id).push({
       name: customer, ref: 'Unapplied Credit', date: fmtDate(new Date(p.date)), amount: credit,
+    });
+  }
+
+  // QuickBooks: Credit Memos / Journal Entries / Deposits against A/R not yet
+  // applied to an invoice are negative lines, aged by their own date.
+  for (const c of await qboUnappliedArCredits(userId, orgId, asOf)) {
+    const age = daysBetween(asOf, new Date(c.date));
+    const bucket = bucketFor(age);
+    const customer = (c.customer || '').trim() || 'Unknown';
+    if (!byCustomer.has(customer)) {
+      byCustomer.set(customer, Object.fromEntries(BUCKETS.map((b) => [b.id, 0])));
+    }
+    byCustomer.get(customer)[bucket.id] += c.amount;
+    totals[bucket.id] += c.amount;
+    grandTotal += c.amount;
+    drillFor(customer, bucket.id).push({
+      name: customer, ref: c.ref, date: fmtDate(new Date(c.date)), amount: c.amount,
     });
   }
 
