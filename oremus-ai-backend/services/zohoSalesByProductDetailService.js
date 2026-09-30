@@ -249,6 +249,9 @@ async function qboLedgerSalesRows(userId, orgId, from, to, covered) {
         amount:         round2(num(l.net)),
         source_type:    'LEDGER',
         _type:          l.source_type,
+        // The ledger has no quantity. QuickBooks prints -1 for a credit/refund
+        // line without one (and 1 for a sale), so do the same.
+        _ledgerQty:     l.source_type === 'Credit Memo' || l.source_type === 'Refund Receipt' ? -1 : 1,
       });
     }
   }
@@ -492,7 +495,8 @@ async function buildSalesByProductDetail(userId, params = {}) {
       num:      ln.invoice_number || '',
       customer: ln.customer || '',
       desc:     ln.description || '',
-      qty:      hasLineItems && !ln._type ? (ln._qty || null) : null,
+      qty:      ln._ledgerQty != null ? ln._ledgerQty
+        : (hasLineItems && !ln._type ? (ln._qty || null) : null),
       price:    hasLineItems && !ln._type ? (ln._price != null ? round2(ln._price) : null) : null,
       // Ledger-sourced rows (_type set) already carry their sign: a credit memo
       // debits income, so it's negative.
@@ -507,7 +511,9 @@ async function buildSalesByProductDetail(userId, params = {}) {
   // Products alphabetically, as the platform reports list them.
   for (const name of [...groups.keys()].sort((a, b) => a.localeCompare(b))) {
     const entries = groups.get(name);
-    rows.push({ label: name, isHeader: true, level: 0, cells: {} });
+    // "Services (388)" — the product and its number of transactions, as
+    // QuickBooks prints the group heading. The subtotal keeps the bare name.
+    rows.push({ label: `${name} (${entries.length})`, isHeader: true, level: 0, cells: {}, count: entries.length });
     let running = 0;
     let groupAmount = 0;
     let groupQty = 0;
