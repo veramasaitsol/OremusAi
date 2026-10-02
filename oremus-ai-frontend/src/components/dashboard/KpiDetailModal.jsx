@@ -57,7 +57,9 @@ function RevenueDetail({ from, to }) {
   if (error) return <DetailError message={error} onRetry={() => setAttempt(a => a + 1)} />;
   if (!data) return <div className="space-y-3"><Skeleton className="h-32" /><Skeleton className="h-48" /></div>;
 
-  const growth = data.growth ?? 0;
+  // Percentage vs the immediately preceding equivalent period; null = no
+  // basis for one (no prior-period data or prior was 0) — shown as "—".
+  const growth = data.growth == null ? null : Number(data.growth);
   return (
     <div className="space-y-5">
       {/* Summary row */}
@@ -65,7 +67,7 @@ function RevenueDetail({ from, to }) {
         {[
           { label: 'This Period', value: fmtINR(data.current), color: '#2563EB' },
           { label: 'Prior Period', value: fmtINR(data.prior), color: '#64748b' },
-          { label: 'Growth', value: `${growth >= 0 ? '+' : ''}${growth?.toFixed(1)}%`, color: growth >= 0 ? '#10B981' : '#EF4444' },
+          { label: 'Growth', value: growth == null ? '—' : `${growth >= 0 ? '+' : ''}${growth.toFixed(1)}%`, color: growth == null ? '#64748b' : growth >= 0 ? '#10B981' : '#EF4444' },
         ].map(k => (
           <div key={k.label} className="rounded-xl bg-navy-50 dark:bg-navy-800 p-2.5 text-center min-w-0">
             <div className="text-[9px] uppercase tracking-wider text-navy-500 mb-1 truncate">{k.label}</div>

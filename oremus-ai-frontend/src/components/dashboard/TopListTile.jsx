@@ -21,7 +21,7 @@ export default function TopListTile({ title, rows = [], accent = '#2563EB', load
             </svg>
           )}
         </div>
-        <button onClick={onViewAll} className="text-[10.5px] font-semibold text-brand-600 hover:underline">All →</button>
+        <button onClick={onViewAll} className="text-[10.5px] font-semibold text-brand-600 hover:underline">Details →</button>
       </div>
 
       {/* Skeleton rows while loading */}
@@ -39,7 +39,6 @@ export default function TopListTile({ title, rows = [], accent = '#2563EB', load
         <ul className="space-y-2">
           {rows.map((r, i) => {
             const pct = (r.amount / max) * 100;
-            const up  = (r.trend || 0) >= 0;
             return (
               <li key={r.id} className="group">
                 <div className="flex items-center gap-2">
@@ -52,9 +51,7 @@ export default function TopListTile({ title, rows = [], accent = '#2563EB', load
                     <div className="text-[12px] font-bold tabular-nums text-navy-900 dark:text-white">
                       <CountUpValue value={fmtAmt(r.amount)} />
                     </div>
-                    <div className={`text-[10px] font-semibold tabular-nums ${up ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
-                      {up ? '▲' : '▼'} {Math.abs(r.trend).toFixed(1)}%
-                    </div>
+                    {/* Per-row growth lives in the full list (TopListModal), not this compact tile. */}
                   </div>
                 </div>
                 <div className="ml-7 mt-1 h-0.5 rounded-full bg-navy-100 dark:bg-navy-800 overflow-hidden">

@@ -2,6 +2,7 @@ import * as Icons from 'lucide-react';
 import { ExternalLink } from 'lucide-react';
 import Tile from './Tile.jsx';
 import CountUpValue from './CountUpValue.jsx';
+import GrowthBadge, { showsGrowthOnTile } from './GrowthBadge.jsx';
 import { fmt } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
 
@@ -12,10 +13,7 @@ function fmtINR(n) {
 
 export default function KpiTile({ kpi, onClick }) {
   const Icon = Icons[kpi.icon] || Icons.Activity;
-  const up = (kpi.delta || 0) >= 0;
   const isInverse  = kpi.id === 'burn';
-  const positive   = isInverse ? !up : up;
-  const trendColor = positive ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400';
   const hasDetail  = ['rev', 'cash', 'burn', 'rec', 'ebitda'].includes(kpi.id);
 
   const displayValue = kpi.isText
@@ -23,6 +21,9 @@ export default function KpiTile({ kpi, onClick }) {
     : typeof kpi.value === 'number'
       ? fmtINR(kpi.value)
       : kpi.value;
+  // Growth stays in the data (kpi.delta) and in the detail view; the tile shows
+  // it only where it has a place and isn't already printed (see GrowthBadge).
+  const showGrowth = showsGrowthOnTile(kpi, displayValue);
 
   return (
     <Tile
@@ -56,11 +57,7 @@ export default function KpiTile({ kpi, onClick }) {
         </div>
         <div className="flex items-center justify-between gap-2 mt-1.5">
           <div className="text-[11px] text-navy-500 truncate">{kpi.sub}</div>
-          {kpi.delta != null && (
-            <div className={`text-[11px] font-semibold whitespace-nowrap ${trendColor}`}>
-              {up ? '▲' : '▼'} {Math.abs(kpi.delta).toFixed(1)}%
-            </div>
-          )}
+          {showGrowth && <GrowthBadge value={kpi.delta} inverse={isInverse} className="text-[11px]" />}
         </div>
       </div>
 

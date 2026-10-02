@@ -1,5 +1,6 @@
 import axiosClient from '../../services/axiosClient.js';
 import { fmt } from '../../utils/fmt.js';
+import { previousPeriod, growthPct } from '../../utils/periodCompare.js';
 
 const PALETTE = ['#2563EB', '#06B6D4', '#8B5CF6', '#10B981', '#F59E0B', '#64748B'];
 
@@ -36,6 +37,23 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
       : null;
     const softEmpty = () => ({ data: { data: [] } });
 
+    // Period-over-period growth: the same endpoints for the immediately
+    // preceding equivalent period (utils/periodCompare.js), raw values only.
+    // Each call soft-fails to null so a missing prior period hides the growth
+    // instead of faking 0%.
+    const prev = (from && to) ? previousPeriod(from, to) : null;
+    const prevParams = prev ? { ...params, from: prev.from, to: prev.to } : null;
+    const prevGet = (url) => (prevParams
+      ? axiosClient.get(url, { params: prevParams }).then((r) => r.data?.data ?? null).catch(() => null)
+      : Promise.resolve(null));
+    const prevPromise = Promise.all([
+      prevGet('/dashboard'),
+      prevGet('/metrics/profitability'),
+      prevGet('/ratios'),
+      prevGet('/dashboard/top-customers?limit=50'),
+      prevGet('/dashboard/top-vendors?limit=50'),
+    ]);
+
     const [statsRes, revRes, expRes, topCustRes, topVendRes, expBreakRes, cashRes, activityRes, profitRes, complianceRes, ratiosRes, lastYearRevRes, lastYearExpRes] =
       await Promise.all([
         axiosClient.get('/dashboard',                        { params }),
@@ -64,6 +82,7 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
         lastYearParams ? axiosClient.get('/dashboard/expense-trend', { params: lastYearParams }).catch(softEmpty) : softEmpty(),
       ]);
 
+    const [prevStats, prevProfit, prevRatios, prevTopCust, prevTopVend] = await prevPromise;
     const stats    = statsRes.data.data    ?? {};
     const revTrend = revRes.data.data      ?? [];
     const expTrend = expRes.data.data      ?? [];
@@ -125,7 +144,7 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
       //   label: 'Total Revenue',
       //   value: Math.round(stats.totalRevenue || 0),
       //   sub:   'this period',
-      //   delta: stats.revenueGrowth ?? 0,
+      //   delta: growthPct(stats.totalRevenue, prevStats?.totalRevenue),
       //   color: '#2563EB',
       //   icon:  'TrendingUp',
       // },
@@ -134,7 +153,7 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
         label:  'Cash on Hand',
         value:  cashOnHand,
         sub:    bankCount > 0 ? `across ${bankCount} bank${bankCount !== 1 ? 's' : ''}` : 'bank balance',
-        delta:  0,
+        delta:  growthPct(stats.cashOnHand, prevStats?.cashOnHand),
         color:  '#8B5CF6',
         icon:   'Wallet',
       },
@@ -150,7 +169,11 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
         sub:    runwayMonths != null
                   ? (monthlyBurn > 0 ? `${fmt(monthlyBurn, { currency: cur })}/mo burn` : 'runway estimate')
                   : (monthlyBurn > 0 ? (cashOnHand <= 0 ? 'cash deficit · no runway' : 'monthly burn rate') : 'no burn data'),
-        delta:  -4.2,   // static until we have MoM burn tracking
+        // Monthly burn vs the previous period's monthly burn. A fall is good —
+        // KpiTile shows burn with inverse colours; the maths stays plain.
+        delta:  monthlyBurn > 0 || (prevStats?.monthlyBurn || 0) > 0
+                  ? growthPct(stats.monthlyBurn, prevStats?.monthlyBurn)
+                  : null,
         color:  '#EF4444',
         icon:   'TrendingDown',
       },
@@ -160,7 +183,7 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
       //   label: 'Receivables',
       //   value: Math.round(stats.outstandingReceivables || 0),
       //   sub:   `${stats.totalInvoices || 0} invoices`,
-      //   delta: 0,
+      //   delta: growthPct(stats.outstandingReceivables, prevStats?.outstandingReceivables),
       //   color: '#10B981',
       //   icon:  'ReceiptText',
       // },
@@ -170,7 +193,7 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
         label: 'EBITDA',
         value: Math.round(profit.ebitda || 0),
         sub:   profit.ebitdaMargin == null ? 'margin —' : `${profit.ebitdaMargin}% margin`,
-        delta: 0,
+        delta: growthPct(profit.ebitda, prevProfit?.ebitda),
         color: '#8B5CF6',
         icon:  'BarChart2',
       },
@@ -187,7 +210,7 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
                   : ratios.currentRatio >= 1.5 ? 'healthy liquidity'
                   : ratios.currentRatio >= 1   ? 'adequate liquidity'
                   : 'below 1× — watch closely',
-        delta: 0,
+        delta: growthPct(ratios.currentRatio, prevRatios?.currentRatio),
         color: '#06B6D4',
         icon:  'Scale',
       },
@@ -204,13 +227,30 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
         }))
       : [];
 
-    // ── Top customers ─────────────────────────────────────────────────────────
+    // ── Top customers / vendors ───────────────────────────────────────────────
+    // Each row's growth = its amount vs the same customer/vendor's amount in the
+    // previous period (matched by name in that period's top 50). Not in that
+    // list, or no previous-period data → null (unknown), never a fake 0%.
+    // Matched on the customer/vendor id when the endpoint returns one, else on
+    // the name (today's endpoints group and total by name, so name is exact).
+    const ID_KEYS = ['customer_id', 'vendor_id', 'contact_id', 'zoho_customer_id', 'zoho_vendor_id', 'id'];
+    const keyOf = (r, nameKey) => {
+      const idKey = ID_KEYS.find((k) => r?.[k] != null && r[k] !== '');
+      return idKey ? `id:${r[idKey]}` : `name:${String(r?.[nameKey] || '').trim().toLowerCase()}`;
+    };
+    const prevAmount = (list, nameKey, amountKey) => {
+      if (!Array.isArray(list)) return () => null;
+      const m = new Map(list.map((r) => [keyOf(r, nameKey), Number(r[amountKey] || 0)]));
+      return (row) => (m.has(keyOf(row, nameKey)) ? m.get(keyOf(row, nameKey)) : null);
+    };
+    const prevCust = prevAmount(prevTopCust, 'customer_name', 'totalRevenue');
+    const prevVend = prevAmount(prevTopVend, 'vendor_name', 'totalAmount');
     const topCustomers = topCust.map((c, i) => ({
       id:     `tc${i}`,
       name:   c.customer_name,
       sub:    `${c.invoiceCount} invoice${c.invoiceCount !== 1 ? 's' : ''}`,
       amount: Math.round(c.totalRevenue || 0),
-      trend:  0,
+      trend:  growthPct(c.totalRevenue, prevCust(c)),
     }));
 
     // ── Top vendors ───────────────────────────────────────────────────────────
@@ -219,12 +259,13 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
       name:   v.vendor_name,
       sub:    `${v.billCount} bill${v.billCount !== 1 ? 's' : ''}`,
       amount: Math.round(v.totalAmount || 0),
-      trend:  0,
+      trend:  growthPct(v.totalAmount, prevVend(v)),
     }));
 
     return {
       revExp,
       lastYearProfit,
+      comparePeriod: prev,
       cashFlow,
       kpis,
       expenseMix,

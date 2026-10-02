@@ -596,6 +596,8 @@ export default function Dashboard() {
           rows={topModal === 'vendors' ? dash.topVendors : dash.topCustomers}
           accent={topModal === 'vendors' ? '#F59E0B' : '#2563EB'}
           kind={topModal}
+          from={dateRange.from}
+          to={dateRange.to}
           onClose={() => setTopModal(null)}
         />
       )}

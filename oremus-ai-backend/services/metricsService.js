@@ -219,6 +219,30 @@ function growth(current, prior) {
   return { current: cur, prior: p, growthPct: round2(((cur - p) / Math.abs(p)) * 100) };
 }
 
+// Same dates one year earlier (2025-04-01..2026-03-31 → 2024-04-01..2025-03-31);
+// 29 Feb clamps to 28 Feb in a non-leap year.
+function priorYearPeriod({ from, to }) {
+  const back = (s) => {
+    const d = new Date(s + 'T00:00:00Z');
+    const day = d.getUTCDate();
+    d.setUTCFullYear(d.getUTCFullYear() - 1);
+    if (d.getUTCDate() !== day) d.setUTCDate(0);
+    return d.toISOString().slice(0, 10);
+  };
+  return { from: back(from), to: back(to) };
+}
+
+// Revenue Growth = Current Year Revenue / Prior Year Revenue − 1 (as a %).
+// Null when there is no prior-year revenue to divide by.
+function yearOverYearGrowth(current, prior) {
+  const cur = Number(current) || 0;
+  if (prior == null || Number(prior) === 0) {
+    return { current: cur, prior: prior == null ? null : Number(prior), growthPct: null };
+  }
+  const p = Number(prior);
+  return { current: cur, prior: p, growthPct: round2((cur / p - 1) * 100) };
+}
+
 // ── Cash Flow derivation (Zoho/QB cashflow report) ────────────────────────────
 const RE_CF_OPERATING = /operating activit/i;
 const RE_CF_INVESTING = /investing activit/i;
@@ -713,12 +737,13 @@ async function getRevenueMetrics(ctx, params, opts = {}) {
 
   const pl = await providerPL(ctx, params.from, params.to, params);
 
-  // Prior-period revenue for growth (same window length, shifted back) —
-  // same selected period for every provider, including QuickBooks.
+  // Revenue Growth = Current Year Revenue / Prior Year Revenue − 1: the
+  // selected period vs the same dates one year earlier, same P&L source for
+  // every provider, including QuickBooks.
   let priorRevenue = null;
+  const py = priorYearPeriod({ from: params.from, to: params.to });
   try {
-    const pp = priorPeriod({ from: params.from, to: params.to });
-    priorRevenue = (await providerPL(ctx, pp.from, pp.to, params)).revenue;
+    priorRevenue = (await providerPL(ctx, py.from, py.to, params)).revenue;
   } catch (_) { /* growth stays null */ }
 
   // Breakdowns. Logo churn works off the shared `invoices` table (customer_name
@@ -762,7 +787,7 @@ async function getRevenueMetrics(ctx, params, opts = {}) {
   return {
     revenue: pl.revenue,
     otherIncome: pl.otherIncome,
-    growth: growth(pl.revenue, priorRevenue),
+    growth: { ...yearOverYearGrowth(pl.revenue, priorRevenue), priorFrom: py.from, priorTo: py.to },
     byProduct,
     byGeography,
     recurring,
@@ -904,6 +929,8 @@ module.exports = {
   margins,
   priorPeriod,
   growth,
+  priorYearPeriod,
+  yearOverYearGrowth,
   deriveCashFlow,
   localCashFlow,
   bankFlows,

@@ -60,7 +60,7 @@ export default function RevenueMetrics({ from, to, customer, currency }) {
       {/* KPI row */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-5">
         <MiniKpi label="Total Revenue"  value={revenue}  sub="this period" color="#2563EB" icon={TrendingUp} />
-        <MiniKpi label="Revenue Growth" value={growthPct == null ? '—' : `${growthPct}%`} sub="vs prior period" delta={growthPct ?? undefined} color="#10B981" icon={TrendingUp} isText />
+        <MiniKpi label="Revenue Growth" value={growthPct == null ? '—' : `${growthPct}%`} sub="vs prior year" delta={growthPct ?? undefined} color="#10B981" icon={TrendingUp} isText />
         <MiniKpi label="Recurring"      value={recurringPct == null ? '—' : `${recurringPct}%`} sub="of revenue" color="#8B5CF6" icon={Repeat} isText />
         <MiniKpi label="Churn Rate"     value={churnRate == null ? '—' : `${churnRate}%`} sub="customers lapsed" color="#EF4444" icon={UserMinus} isText />
         <MiniKpi label="Other Income"   value={m.otherIncome ?? 0} sub="non-operating" color="#F59E0B" icon={PlusCircle} />

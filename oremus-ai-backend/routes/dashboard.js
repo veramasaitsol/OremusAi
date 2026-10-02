@@ -12,6 +12,7 @@ const { computeKeyRatios } = require('../services/keyRatiosService');
 const { buildArAgingSummary } = require('../services/salesArFromInvoicesService');
 const { buildApAgingSummary } = require('../services/zohoApAgingDetailService');
 const cache = require('../utils/cache');
+const { previousPeriod, growthPct } = require('../utils/periodCompare');
 const adminClientView = require('../middleware/adminClientView');
 
 const router = Router();
@@ -866,7 +867,7 @@ router.get('/', async (req, res) => {
     if (monthlyBurn > 0 && cashOnHand > 0) {
       const raw = cashOnHand / monthlyBurn;
       // Cap at 60 months — anything beyond 5 years isn't actionable
-      runwayMonths = parseFloat(Math.min(raw, 60).toFixed(1));
+      runwayMonths = parseFloat(Math.min(raw, 60).toFixed(2));
     }
 
     return res.json({
@@ -1266,6 +1267,120 @@ router.get('/top-vendors', async (req, res) => {
   } catch (err) {
     console.error('Top vendors error:', err.message);
     return res.json({ data: [] });
+  }
+});
+
+// ── GET /api/dashboard/vendor-bills ──────────────────────────────────────────
+// One vendor's documents in the selected period, paginated (default 5/page),
+// for the Top Vendors drawer. Uses the SAME source tier /top-vendors ranked
+// from (first tier with any data in the period), so the listed documents add
+// up to that vendor's total.
+router.get('/vendor-bills', async (req, res) => {
+  const empty = { rows: [], total: 0, page: 1, pageSize: 5, totalAmount: 0, source: null };
+  try {
+    const uid = req.user.id;
+    const { from, to } = getDateRange(req.query);
+    const vendor = String(req.query.vendor || '').trim();
+    if (!vendor) return res.json({ data: empty });
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '5', 10) || 5, 1), 50);
+    const page = Math.max(parseInt(req.query.page || '1', 10) || 1, 1);
+    const offset = (page - 1) * pageSize;
+    const { hasAcctTxn, hasQbo, qboUid, hasXero, xeroUid, hasZohoLive } = await dataAvailability(uid, req.orgId, req.adminUserId || null);
+    const orgF = req.orgId ? ' AND org_id = ?' : '';
+    const orgP = req.orgId ? [req.orgId] : [];
+    const has = async (sql, params) => (await safeQuery(sql, params)).length > 0;
+
+    // Each tier: how /top-vendors decides it's the source, plus this vendor's documents.
+    const tiers = [
+      hasZohoLive && {
+        source: 'bills',
+        any: [`SELECT 1 FROM bills WHERE user_id = ? AND vendor_name IS NOT NULL AND vendor_name <> '' AND date BETWEEN ? AND ?${orgF} LIMIT 1`, [uid, from, to, ...orgP]],
+        where: `FROM bills WHERE user_id = ? AND vendor_name = ? AND date BETWEEN ? AND ?${orgF}`,
+        params: [uid, vendor, from, to, ...orgP],
+        select: `DATE_FORMAT(date,'%Y-%m-%d') AS date, bill_number AS number, 'Bill' AS type,
+                 DATE_FORMAT(due_date,'%Y-%m-%d') AS dueDate, status, total AS amount, balance`,
+        order: 'date DESC, bill_number DESC',
+        sum: 'COALESCE(SUM(total),0)',
+      },
+      hasAcctTxn && {
+        source: 'ledger',
+        any: [`SELECT 1 FROM account_transactions WHERE user_id = ? AND account_group = 'expense' AND COALESCE(base_debit, debit) > 0 AND transaction_date BETWEEN ? AND ?${orgF} LIMIT 1`, [uid, from, to, ...orgP]],
+        where: `FROM account_transactions
+                WHERE user_id = ? AND account_group = 'expense' AND COALESCE(base_debit, debit) > 0
+                  AND COALESCE(NULLIF(transaction_details,''), 'Unknown') = ?
+                  AND transaction_date BETWEEN ? AND ?${orgF}`,
+        params: [uid, vendor, from, to, ...orgP],
+        group: 'transaction_id',
+        select: `DATE_FORMAT(MIN(transaction_date),'%Y-%m-%d') AS date, MAX(reference_number) AS number,
+                 MAX(COALESCE(source_type, transaction_type)) AS type, NULL AS dueDate, NULL AS status,
+                 SUM(COALESCE(base_debit, debit)) AS amount, NULL AS balance`,
+        order: 'date DESC',
+        sum: 'COALESCE(SUM(COALESCE(base_debit, debit)),0)',
+      },
+      hasQbo && {
+        source: 'expenses',
+        any: [`SELECT 1 FROM expense_entries WHERE user_id = ? AND qbo_id IS NOT NULL AND expense_date BETWEEN ? AND ? LIMIT 1`, [qboUid, from, to]],
+        where: `FROM expense_entries WHERE user_id = ? AND qbo_id IS NOT NULL AND COALESCE(NULLIF(vendor_name,''), 'Unknown') = ? AND expense_date BETWEEN ? AND ?`,
+        params: [qboUid, vendor, from, to],
+        select: `DATE_FORMAT(expense_date,'%Y-%m-%d') AS date, reference_number AS number, 'Expense' AS type,
+                 NULL AS dueDate, status, amount, NULL AS balance`,
+        order: 'expense_date DESC',
+        sum: 'COALESCE(SUM(amount),0)',
+      },
+      hasXero && {
+        source: 'expenses',
+        any: [`SELECT 1 FROM expense_entries WHERE user_id = ? AND xero_id IS NOT NULL AND expense_date BETWEEN ? AND ? LIMIT 1`, [xeroUid, from, to]],
+        where: `FROM expense_entries WHERE user_id = ? AND xero_id IS NOT NULL AND COALESCE(NULLIF(vendor_name,''), 'Unknown') = ? AND expense_date BETWEEN ? AND ?`,
+        params: [xeroUid, vendor, from, to],
+        select: `DATE_FORMAT(expense_date,'%Y-%m-%d') AS date, reference_number AS number, 'Expense' AS type,
+                 NULL AS dueDate, status, amount, NULL AS balance`,
+        order: 'expense_date DESC',
+        sum: 'COALESCE(SUM(amount),0)',
+      },
+      {
+        source: 'bills',
+        any: null, // final fallback, as in /top-vendors
+        where: `FROM bills WHERE user_id = ? AND qbo_id IS NULL AND xero_id IS NULL AND vendor_name = ? AND date BETWEEN ? AND ?${orgF}`,
+        params: [uid, vendor, from, to, ...orgP],
+        select: `DATE_FORMAT(date,'%Y-%m-%d') AS date, bill_number AS number, 'Bill' AS type,
+                 DATE_FORMAT(due_date,'%Y-%m-%d') AS dueDate, status, total AS amount, balance`,
+        order: 'date DESC, bill_number DESC',
+        sum: 'COALESCE(SUM(total),0)',
+      },
+    ].filter(Boolean);
+
+    let tier = null;
+    for (const t of tiers) {
+      if (!t.any || await has(...t.any)) { tier = t; break; }
+    }
+    if (!tier) return res.json({ data: empty });
+
+    const groupBy = tier.group ? ` GROUP BY ${tier.group}` : '';
+    const [countRow] = await safeQuery(
+      tier.group
+        ? `SELECT COUNT(*) AS n, COALESCE(SUM(a),0) AS amt FROM (SELECT SUM(COALESCE(base_debit, debit)) AS a ${tier.where}${groupBy}) x`
+        : `SELECT COUNT(*) AS n, ${tier.sum} AS amt ${tier.where}`,
+      tier.params
+    );
+    const rows = await safeQuery(
+      `SELECT ${tier.select} ${tier.where}${groupBy} ORDER BY ${tier.order} LIMIT ${pageSize} OFFSET ${offset}`,
+      tier.params
+    );
+    return res.json({
+      data: {
+        rows: rows.map((r) => ({
+          date: r.date, number: r.number || '', type: r.type || '', dueDate: r.dueDate || null,
+          status: r.status || null, amount: Number(r.amount) || 0,
+          balance: r.balance == null ? null : Number(r.balance),
+        })),
+        total: Number(countRow?.n) || 0,
+        totalAmount: Number(countRow?.amt) || 0,
+        page, pageSize, source: tier.source,
+      },
+    });
+  } catch (err) {
+    console.error('Vendor bills error:', err.message);
+    return res.json({ data: empty });
   }
 });
 
@@ -1906,11 +2021,11 @@ router.get('/kpi/revenue', async (req, res) => {
     const orgF = activeOrgId ? ' AND org_id = ?' : '';
     const orgP = activeOrgId ? [activeOrgId] : [];
 
-    const periodMs  = new Date(to) - new Date(from);
-    const priorTo   = new Date(from); priorTo.setDate(priorTo.getDate() - 1);
-    const priorFrom = new Date(priorTo - periodMs);
-    const priorToStr   = priorTo.toISOString().slice(0, 10);
-    const priorFromStr = priorFrom.toISOString().slice(0, 10);
+    // The immediately preceding equivalent period — the same rule the
+    // dashboard uses client-side (utils/periodCompare.js), timezone-safe.
+    const priorRange = previousPeriod(from, to) || { from, to };
+    const priorFromStr = priorRange.from;
+    const priorToStr   = priorRange.to;
 
     let current = 0, prior = 0, trend = [], topCustomers = [];
 
@@ -2027,8 +2142,11 @@ router.get('/kpi/revenue', async (req, res) => {
       prior   = Math.round(parseFloat(priRow?.v || 0));
     }
 
-    const growth = prior > 0 ? parseFloat(((current - prior) / prior).toFixed(4)) : null;
-    return res.json({ data: { trend, topCustomers, current, prior, growth } });
+    // Percentage (was a fraction the popup printed as "%"); null when the prior
+    // period gives no basis for a percentage.
+    const g = growthPct(current, prior);
+    const growth = g == null ? null : parseFloat(g.toFixed(2));
+    return res.json({ data: { trend, topCustomers, current, prior, growth, priorFrom: priorFromStr, priorTo: priorToStr } });
   } catch (err) {
     console.error('KPI revenue error:', err.message);
     return res.json({ data: { trend: [], topCustomers: [], current: 0, prior: 0, growth: null } });
@@ -2213,7 +2331,7 @@ router.get('/kpi/burn', async (req, res) => {
       : 0;
 
     const runwayMonths = avgMonthlyBurn > 0 && cashOnHand > 0
-      ? parseFloat(Math.min(60, cashOnHand / avgMonthlyBurn).toFixed(1))
+      ? parseFloat(Math.min(60, cashOnHand / avgMonthlyBurn).toFixed(2))
       : null;
 
     return res.json({

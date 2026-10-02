@@ -55,7 +55,7 @@ export default function HeroChartTile({ data = [], lastYearProfit = null }) {
             {totalRev > 0 && hasLastYear && (
               <div className={`text-[12px] font-medium ${yoyGain >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
                 {yoyGain >= 0 ? '▲' : '▼'} {fmt(Math.abs(yoyGain))}
-                {yoyPct != null ? ` (${yoyGain >= 0 ? '+' : '−'}${Math.abs(yoyPct).toFixed(1)}%)` : ''} profit vs last year
+                {yoyPct != null ? ` (${yoyGain >= 0 ? '+' : '−'}${Math.abs(yoyPct).toFixed(1)}%)` : ''} profit vs last period
               </div>
             )}
             <div className="text-[12px] text-navy-500 dark:text-navy-300 mt-1">{subtitle}</div>
