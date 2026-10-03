@@ -323,7 +323,7 @@
 //           {data?.executionTimeMs != null && (
 //             <span className="inline-flex items-center gap-1.5 rounded-full border border-navy-200/70 dark:border-navy-700 px-3 py-1.5 text-[11.5px] font-medium text-navy-400 dark:text-navy-400 tabular-nums">
 //               <Timer size={11} />
-//               {(data.executionTimeMs / 1000).toFixed(1)}s total
+//               {(data.executionTimeMs / 1000).toFixed(2)}s total
 //               {data.dbTimeMs != null ? ` · SQL ${(data.dbTimeMs / 1000).toFixed(2)}s` : ''}
 //             </span>
 //           )}

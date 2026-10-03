@@ -235,6 +235,147 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
       });
     }
   }
+
+  // 3. A credit applied through a ZERO-amount payment (QuickBooks applies a
+  //    journal entry or credit memo to invoices this way — the $0 payment lists
+  //    the invoices it settled, not the amount). The credit's share of an
+  //    invoice is what no cash payment or credit note explains:
+  //      total − balance today − all cash applied − all credit notes applied.
+  //    When every such $0 payment naming the invoice is dated AFTER the as-of
+  //    date, that share was still owed on the as-of date, so it's added back.
+  const [allPayments] = await pool.execute(
+    `SELECT amount, unused_amount, invoice_numbers, date, payment_number
+       FROM zb_customer_payments
+      WHERE user_id = ? AND org_id = ? AND COALESCE(invoice_numbers, '') <> ''
+      ORDER BY date`,
+    [userId, orgId]
+  );
+  const zeroPays = allPayments.filter((p) => num(p.amount) === 0);
+  if (zeroPays.length) {
+    // All-time cash applied per invoice (same cap-by-room distribution as above).
+    const cashApplied = new Map();
+    for (const p of allPayments) {
+      let applied = num(p.amount) - num(p.unused_amount);
+      if (applied <= 0) continue;
+      for (const rawNum of String(p.invoice_numbers).split(',')) {
+        const inv = byNum.get(rawNum.trim());
+        if (!inv) continue;
+        const room = Math.max(0, num(inv.total) - (cashApplied.get(inv) || 0));
+        const give = Math.min(room, applied);
+        cashApplied.set(inv, (cashApplied.get(inv) || 0) + give);
+        applied -= give;
+        if (applied <= 0) break;
+      }
+    }
+    const [allCredits] = await pool.execute(
+      `SELECT total, balance, invoice_number FROM zb_credit_notes
+        WHERE user_id = ? AND org_id = ? AND invoice_number IS NOT NULL AND invoice_number <> ''`,
+      [userId, orgId]
+    );
+    const creditApplied = new Map();
+    for (const cn of allCredits) {
+      const inv = byNum.get(String(cn.invoice_number).trim());
+      if (inv) creditApplied.set(inv, (creditApplied.get(inv) || 0) + Math.max(0, num(cn.total) - num(cn.balance)));
+    }
+    // $0 payments naming each invoice.
+    const zeroByInv = new Map();
+    for (const p of zeroPays) {
+      for (const rawNum of String(p.invoice_numbers).split(',')) {
+        const inv = byNum.get(rawNum.trim());
+        if (!inv) continue;
+        if (!zeroByInv.has(inv)) zeroByInv.set(inv, []);
+        zeroByInv.get(inv).push(p);
+      }
+    }
+    const asOfDay = ymd(asOf);
+    const dayOf = (d) => (d instanceof Date ? ymd(d) : String(d || '').slice(0, 10));
+
+    // When an invoice has $0 applications on BOTH sides of the as-of date, only
+    // the later ones were still owed then. Replay cash payments and $0 credit
+    // applications in date order (each $0 payment carries the amount of the
+    // credit documents it names — journal entry / credit memo numbers, found on
+    // the A/R ledger by reference number) to get each application's exact share.
+    const tokensOf = (p) => String(p.invoice_numbers).split(',').map((t) => t.trim()).filter(Boolean);
+    const creditRefs = [...new Set(zeroPays.flatMap(tokensOf).filter((t) => !byNum.has(t)))];
+    const creditAmt = new Map();
+    if (creditRefs.length) {
+      const [docs] = await pool.query(
+        `SELECT reference_number AS ref,
+                SUM(COALESCE(base_credit, credit)) - SUM(COALESCE(base_debit, debit)) AS net
+           FROM account_transactions
+          WHERE user_id = ? AND org_id = ? AND account_type_code = 'accounts_receivable'
+            AND source_type IN ('Credit Memo', 'Journal Entry', 'Deposit', 'Refund Receipt')
+            AND reference_number IN (?)
+          GROUP BY source_type, source_id, reference_number`,
+        [userId, orgId, creditRefs]
+      );
+      for (const d of docs) {
+        const ref = String(d.ref || '').trim();
+        if (num(d.net) > 0.005 && !creditAmt.has(ref)) creditAmt.set(ref, num(d.net));
+      }
+    }
+    const zeroShare = new Map(); // invoice -> Map(payment -> amount it applied)
+    {
+      const open = new Map();
+      for (const inv of byNum.values()) open.set(inv, num(inv.total));
+      const credLeft = new Map(creditAmt);
+      const events = allPayments
+        .map((p) => ({ p, day: dayOf(p.date), cash: num(p.amount) > 0 ? num(p.amount) - num(p.unused_amount) : 0 }))
+        .sort((a, b) => a.day.localeCompare(b.day) || (b.cash > 0) - (a.cash > 0));
+      for (const { p, cash } of events) {
+        const invs = tokensOf(p).map((t) => byNum.get(t)).filter(Boolean);
+        if (cash > 0) {
+          let left = cash;
+          for (const inv of invs) {
+            const t = Math.min(open.get(inv), left);
+            open.set(inv, open.get(inv) - t);
+            left -= t;
+          }
+          continue;
+        }
+        if (num(p.amount) !== 0) continue;
+        const refs = tokensOf(p).filter((t) => credLeft.has(t));
+        for (const inv of invs) {
+          let need = open.get(inv);
+          for (const r of refs) {
+            if (need <= 0.005) break;
+            const rate = num(inv.exchange_rate) > 0 ? num(inv.exchange_rate) : 1;
+            const t = Math.min(credLeft.get(r) / rate, need);
+            credLeft.set(r, credLeft.get(r) - t * rate);
+            need -= t;
+            if (!zeroShare.has(inv)) zeroShare.set(inv, new Map());
+            const m = zeroShare.get(inv);
+            m.set(p, (m.get(p) || 0) + t);
+          }
+          open.set(inv, need);
+        }
+      }
+    }
+
+    for (const [inv, pays] of zeroByInv) {
+      const after = pays.filter((p) => dayOf(p.date) > asOfDay);
+      if (!after.length) continue; // all applied on/before as-of — already reflected
+      const unexplained = num(inv.total) - num(inv.balance) - (cashApplied.get(inv) || 0) - (creditApplied.get(inv) || 0);
+      let owed = unexplained;
+      if (after.length < pays.length) {
+        // Mixed: add back only the shares of the later applications.
+        const shares = zeroShare.get(inv);
+        if (!shares) continue;
+        owed = after.reduce((s, p) => s + (shares.get(p) || 0), 0);
+      }
+      const room = Math.max(0, num(inv.total) - inv._balanceAsOf);
+      const give = Math.round(Math.min(room, unexplained, owed) * 100) / 100;
+      if (give > 0.005) {
+        inv._balanceAsOf += give;
+        const p = after[0];
+        inv._breakdown.push({
+          name: inv.customer_name || null, ref: p.payment_number || p.reference_number || 'Credit applied',
+          date: p.date ? dayOf(p.date) : null,
+          type: 'Credit applied reversed (applied after as-of date)', amount: give,
+        });
+      }
+    }
+  }
 }
 
 // ─── Sales by Customer ──────────────────────────────────────────────────────

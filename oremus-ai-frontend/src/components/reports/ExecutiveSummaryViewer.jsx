@@ -58,7 +58,7 @@ const fieldCls =
 // Format a value for its unit (currency uses parentheses for negatives, Xero-style).
 function fmtCell(v, unit, sym, decimals = true) {
   if (v == null || Number.isNaN(v)) return '–';
-  if (unit === 'percent') return `${v.toFixed(1)}%`;
+  if (unit === 'percent') return `${v.toFixed(2)}%`;
   if (unit === 'days')    return String(Math.round(v));
   if (unit === 'number')  return Math.round(v).toLocaleString('en-US');
   if (unit === 'ratio')   return v.toFixed(2);
@@ -75,7 +75,7 @@ function VarCell({ v }) {
   return (
     <span className={cn('inline-flex items-center justify-end gap-1', up ? 'text-emerald-600' : 'text-rose-600')}>
       {up ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
-      {`${Math.abs(v).toFixed(1)}%`}
+      {`${Math.abs(v).toFixed(2)}%`}
     </span>
   );
 }

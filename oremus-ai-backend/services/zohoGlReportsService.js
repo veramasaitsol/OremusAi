@@ -54,6 +54,17 @@ function isRetainedEarningsAccount(entry) {
   return RETAINED_EARNINGS_RE.test(String((entry && entry.name) || '').trim());
 }
 
+// True when the org's synced ledger comes from Zoho Books — from the request's
+// platform when given, else from the ledger rows' own `platform` tag.
+async function isZohoLedger(userId, orgId, platform) {
+  if (platform) return platform === 'zoho';
+  const [rows] = await pool.execute(
+    'SELECT platform FROM account_transactions WHERE user_id = ? AND org_id = ? LIMIT 1',
+    [userId, orgId]
+  );
+  return String(rows[0]?.platform || '').toLowerCase() === 'zoho';
+}
+
 // Resolve the org to report on: an explicit org (X-Org-Id switcher) wins,
 // otherwise fall back to the connection's primary org.
 async function resolveOrgId(userId, params) {
@@ -352,6 +363,32 @@ async function buildTrialBalance(userId, params = {}) {
   // buildBalanceSheet uses): RE ledger balance + prior P&L before `from`,
   // with clearing residual folded in. Do NOT re-inject prior P&L here — that
   // double-counted against aggregateBS and drifted from the Balance Sheet.
+  //
+  // Zoho Books prints Retained Earnings with the prior years' P&L already
+  // closed into its OPENING balance: opening = closing, and the Debit/Credit
+  // columns carry only real journal postings to the account within the
+  // period. Our opening snapshot (as of from − 1) still holds last year's
+  // profit as "current year earnings", so that roll-over would otherwise show
+  // up as a period movement. QuickBooks / Xero keep the existing layout.
+  if (!inverted && await isZohoLedger(userId, orgId, platform)) {
+    for (const a of accounts) {
+      if (a.groupRaw !== 'equity' || !isRetainedEarningsAccount(a)) continue;
+      let moved = 0; // debit-positive real postings in [from, asOf]
+      if (!String(a.ref).startsWith('__')) {
+        const [[m]] = await pool.execute(
+          `SELECT COALESCE(SUM(COALESCE(base_debit, debit) - COALESCE(base_credit, credit)), 0) AS net
+             FROM account_transactions
+            WHERE user_id = ? AND org_id = ? AND account_id = ?
+              AND transaction_date BETWEEN ? AND ?${currClause}`,
+          [userId, orgId, a.ref, from, asOf, ...(currencyCode ? [currencyCode] : [])]
+        );
+        moved = r2(num(m.net));
+      }
+      a.opening = r2(a.closing - moved);
+      a.debit = moved > 0 ? moved : 0;
+      a.credit = moved < 0 ? -moved : 0;
+    }
+  }
 
   accounts.sort((a, b) => {
     const ga = TB_GROUP_ORDER.indexOf(a.group);

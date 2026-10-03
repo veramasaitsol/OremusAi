@@ -54,7 +54,7 @@ export function MiniKpi({ label, value, sub, delta, color = '#2563EB', icon: Ico
           {sub && <div className="text-[10.5px] text-navy-400 truncate">{sub}</div>}
           {delta != null && (
             <div className={`text-[10.5px] font-semibold whitespace-nowrap ${up ? 'text-emerald-600' : 'text-red-500'}`}>
-              {up ? '▲' : '▼'} {Math.abs(delta).toFixed(1)}%
+              {up ? '▲' : '▼'} {Math.abs(delta).toFixed(2)}%
             </div>
           )}
         </div>

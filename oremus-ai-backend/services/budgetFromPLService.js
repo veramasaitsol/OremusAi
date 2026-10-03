@@ -120,7 +120,7 @@ function budgetVarianceFromPL(periodPL, ytdPL, { from, to, ytdFrom }) {
   }
 
   const budgetFor = () => 0;
-  const pct = (actual, budget) => (!budget ? '-' : `${(((actual - budget) / Math.abs(budget)) * 100).toFixed(1)}%`);
+  const pct = (actual, budget) => (!budget ? '-' : `${(((actual - budget) / Math.abs(budget)) * 100).toFixed(2)}%`);
   const cells = (cur, ytd) => {
     const cb = budgetFor();
     const yb = budgetFor();

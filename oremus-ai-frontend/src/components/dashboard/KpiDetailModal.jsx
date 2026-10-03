@@ -67,7 +67,7 @@ function RevenueDetail({ from, to }) {
         {[
           { label: 'This Period', value: fmtINR(data.current), color: '#2563EB' },
           { label: 'Prior Period', value: fmtINR(data.prior), color: '#64748b' },
-          { label: 'Growth', value: growth == null ? '—' : `${growth >= 0 ? '+' : ''}${growth.toFixed(1)}%`, color: growth == null ? '#64748b' : growth >= 0 ? '#10B981' : '#EF4444' },
+          { label: 'Growth', value: growth == null ? '—' : `${growth >= 0 ? '+' : ''}${growth.toFixed(2)}%`, color: growth == null ? '#64748b' : growth >= 0 ? '#10B981' : '#EF4444' },
         ].map(k => (
           <div key={k.label} className="rounded-xl bg-navy-50 dark:bg-navy-800 p-2.5 text-center min-w-0">
             <div className="text-[9px] uppercase tracking-wider text-navy-500 mb-1 truncate">{k.label}</div>

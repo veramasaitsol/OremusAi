@@ -1682,8 +1682,8 @@ router.get('/profitability', async (req, res) => {
     } catch (_) { /* keep the branch-computed `expenses` above */ }
 
     const netProfit   = revenue - expenses;
-    const expenseRatio = revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(1)) : 0;
-    const netMargin    = revenue > 0 ? parseFloat(((netProfit / revenue) * 100).toFixed(1)) : 0;
+    const expenseRatio = revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(2)) : 0;
+    const netMargin    = revenue > 0 ? parseFloat(((netProfit / revenue) * 100).toFixed(2)) : 0;
 
     // Trend spans the SELECTED period (from → to), so every chart lines up with
     // the chosen window (e.g. a financial year shows Apr → Mar) instead of a
@@ -1809,9 +1809,10 @@ router.get('/efficiency', async (req, res) => {
     const av = await dataAvailability(uid, req.orgId, req.adminUserId || null);
     const { hasZohoLive, zohoUid, hasQbo, qboUid, hasXero, xeroUid } = av;
     const invUid = hasZohoLive ? (zohoUid || uid) : hasQbo ? qboUid : hasXero ? xeroUid : uid;
-    const { orgId: agingOrgId } = await resolveEffectiveOrgContext(av, uid, req);
+    const { effUid: ctxUid, orgId: agingOrgId, platform: ctxPlatform } = await resolveEffectiveOrgContext(av, uid, req);
 
-    const periodDays = Math.max(1, (new Date(to) - new Date(from)) / 86400000);
+    // Days in the selected period, inclusive (1 Apr – 31 Mar = 365).
+    const periodDays = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
 
     const [revRow]  = await safeQuery(
       `SELECT COALESCE(SUM(COALESCE(base_credit, credit)),0) AS v FROM account_transactions
@@ -1860,6 +1861,11 @@ router.get('/efficiency', async (req, res) => {
     const allExpSpan = Math.max(1, parseFloat(allTimeExp?.span_days || 365));
     let annualRev  = (parseFloat(allTimeRev?.v || 0) / allRevSpan) * 365;
     let annualExp  = (parseFloat(allTimeExp?.v || 0) / allExpSpan) * 365;
+    let receivablesAsOf = receivables;
+    let payablesAsOf    = payables;
+    let openingReceivables = null; // AR the day before `from`, for average AR
+    let openingPayables = null;    // AP the day before `from`, for average AP
+    let operatingExpenses = null;  // P&L operating expenses for the period
 
     // ── Liabilities → equity (for ROE / Debt-driven ratios) ───────────────────
     // Equity = total assets − total liabilities (latest per-account balances),
@@ -1875,6 +1881,31 @@ router.get('/efficiency', async (req, res) => {
       [uid, ...orgP, uid, ...orgP]
     );
     let totalLiabilities = liabRows.reduce((s, r) => s + Math.abs(parseFloat(r.balance || 0)), 0);
+
+    // Period-correct inputs. The queries above read TODAY's open AR/AP, the
+    // latest-ever account balances and all-time revenue/expenses, so AR Days,
+    // AP Days, Asset Turnover, ROE and the totals never moved with the
+    // selected dates. Use the same engine as the Liquidity section / Ratios
+    // page instead: P&L for [from, to] and Balance Sheet as of `to`. The
+    // queries above remain the fallback when that engine has no org to read.
+    if (ctxUid && agingOrgId) {
+      try {
+        const { raw } = await computeKeyRatios(ctxUid, agingOrgId, ctxPlatform, from, to, 4);
+        revenue          = Number(raw.revenue) || 0;
+        expenses         = revenue + (Number(raw.otherIncome) || 0) - (Number(raw.netProfit) || 0); // every expense line
+        totalAssets      = Math.abs(Number(raw.totalAssets) || 0);
+        totalLiabilities = Math.abs(Number(raw.totalLiabilities) || 0);
+        receivablesAsOf  = Number(raw.accountsReceivable) || 0;
+        payablesAsOf     = Math.abs(Number(raw.accountsPayable) || 0);
+        openingReceivables = raw.openingAccountsReceivable == null ? null : Number(raw.openingAccountsReceivable) || 0;
+        openingPayables = raw.openingAccountsPayable == null ? null : Math.abs(Number(raw.openingAccountsPayable) || 0);
+        operatingExpenses = Number(raw.opex) || 0;
+        annualRev = (revenue  / periodDays) * 365;
+        annualExp = (expenses / periodDays) * 365;
+      } catch (err) {
+        console.warn('[efficiency] period figures unavailable, using fallback:', err.message);
+      }
+    }
 
     // QuickBooks/Xero write no dated general ledger here, so everything above
     // (totalAssets, totalLiabilities, revenue, expenses, annualRev/Exp) reads
@@ -1901,18 +1932,33 @@ router.get('/efficiency', async (req, res) => {
       }
     }
 
-    // Standard formula: (balance / annual_total) * 365
-    const arDays        = annualRev > 0 ? Math.round((receivables / annualRev) * 365) : 0;
-    const apDays        = annualExp > 0 ? Math.round((payables    / annualExp) * 365) : 0;
+    // AR Days (standard) = Average AR ÷ Revenue × days in the period, where
+    // Average AR = (opening AR + closing AR) ÷ 2 — i.e. 365 ÷ Receivables
+    // Turnover over a full year. Opening AR is the balance the day before
+    // `from`; without an opening snapshot it falls back to closing AR.
+    const averageReceivables = openingReceivables != null
+      ? (openingReceivables + receivablesAsOf) / 2
+      : receivablesAsOf;
+    const arDays = revenue > 0 ? Math.round((averageReceivables / revenue) * periodDays) : 0;
+    // AP Days (standard) = Average AP ÷ Operating Expenses × days in the
+    // period, where Average AP = (opening AP + closing AP) ÷ 2. Opening AP is
+    // the balance the day before `from`; without an opening snapshot it falls
+    // back to closing AP. Without P&L operating expenses (engine unavailable)
+    // the period's total expenses are used.
+    const averagePayables = openingPayables != null
+      ? (openingPayables + payablesAsOf) / 2
+      : payablesAsOf;
+    const apExpenseBase = operatingExpenses != null ? operatingExpenses : expenses;
+    const apDays = apExpenseBase > 0 ? Math.round((averagePayables / apExpenseBase) * periodDays) : 0;
     const assetTurnover = totalAssets > 0 && annualRev > 0
       ? parseFloat((annualRev / totalAssets).toFixed(2)) : 0;
 
     const equity           = totalAssets - totalLiabilities;
     const annualNetProfit  = annualRev - annualExp;
-    const roe = equity > 0 ? parseFloat(((annualNetProfit / equity) * 100).toFixed(1)) : null;
+    const roe = equity > 0 ? parseFloat(((annualNetProfit / equity) * 100).toFixed(2)) : null;
 
     // ── Cost to Income ratio (period) ─────────────────────────────────────────
-    const costToIncome = revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(1)) : null;
+    const costToIncome = revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(2)) : null;
 
     // ── AR / AP ageing buckets ────────────────────────────────────────────────
     // Reuses the SAME point-in-time engine as the "AR Aging Summary" / "AP
@@ -1989,8 +2035,13 @@ router.get('/efficiency', async (req, res) => {
     return res.json({
       data: {
         arDays, apDays, assetTurnover,
-        receivables: Math.round(receivables),
-        payables:    Math.round(payables),
+        receivables: Math.round(receivablesAsOf),
+        openingReceivables: openingReceivables == null ? null : Math.round(openingReceivables),
+        averageReceivables: Math.round(averageReceivables),
+        payables:    Math.round(payablesAsOf),
+        openingPayables: openingPayables == null ? null : Math.round(openingPayables),
+        averagePayables: Math.round(averagePayables),
+        operatingExpenses: operatingExpenses == null ? null : Math.round(operatingExpenses),
         revenue:     Math.round(revenue),
         expenses:    Math.round(expenses),
         totalAssets: Math.round(totalAssets),

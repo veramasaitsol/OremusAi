@@ -51,7 +51,7 @@ export default function GaugeChart({
   max   = 100,
   benchmarks = [],      // [{ value, label }]
   color = '#10B981',
-  fmt   = (v) => v.toFixed(1),
+  fmt   = (v) => v.toFixed(2),
   fmtAxis,
   label,
   formula,

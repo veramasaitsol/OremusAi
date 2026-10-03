@@ -197,7 +197,7 @@ function budgetFor() {
 // Variance % = (actual − budget) / |budget| × 100; "-" when there's no budget.
 function pct(actual, budget) {
   if (!budget) return '-';
-  return `${(((actual - budget) / Math.abs(budget)) * 100).toFixed(1)}%`;
+  return `${(((actual - budget) / Math.abs(budget)) * 100).toFixed(2)}%`;
 }
 
 async function buildBudgetVariance(userId, params = {}) {

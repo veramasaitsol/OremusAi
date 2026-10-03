@@ -325,6 +325,10 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
       totalLiabilities: close.totalLiabilities, currentLiabilities: close.currentLiabilities,
       totalEquity: close.totalEquity, totalDebt: close.debt,
       accountsReceivable: close.ar, accountsPayable: close.ap, bankBalance: close.bank,
+      // Balances the day before `from` (null without an opening snapshot) — for
+      // average-balance ratios such as standard AR Days.
+      openingAccountsReceivable: hasOpening ? open.ar : null,
+      openingAccountsPayable: hasOpening ? open.ap : null,
       hasOpeningPeriodData: hasOpening,
       from, to, asOfOpen, asOfClose, platform, fyStartMonth,
     },

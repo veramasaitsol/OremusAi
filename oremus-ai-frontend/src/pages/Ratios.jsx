@@ -50,12 +50,12 @@ function colorAboveZero(v) {
 }
 
 // ── Formatters ────────────────────────────────────────────────────────────────
-const pct  = (v) => (v == null ? 'N/A' : `${v.toFixed(1)}%`);
+const pct  = (v) => (v == null ? 'N/A' : `${v.toFixed(2)}%`);
 const pctA = (v) => `${v}%`;
-const ratio= (v) => (v == null ? 'N/A' : v.toFixed(1));
+const ratio= (v) => (v == null ? 'N/A' : v.toFixed(2));
 const times= (v) => (v == null ? 'N/A' : `${v.toFixed(2)}×`);
 const timesA= (v) => `${v}×`;
-const days = (v) => (v == null ? 'N/A' : `${v.toFixed(1)}d`);
+const days = (v) => (v == null ? 'N/A' : `${v.toFixed(2)}d`);
 const daysA= (v) => `${v}`;
 
 // Human platform name for the header/footer labels. The ratios are computed
@@ -229,7 +229,7 @@ function buildConfigs(data, currency = 'INR') {
       benchmarks: [{ value: 0, label: '0' }],
       color: colorAboveZero(data.workingCapital),
       fmt: wc, fmtAxis: wcA,
-      formula: '(Current Assets − Current Liabilities) / Total Assets',
+      formula: 'Current Assets − Current Liabilities',
       note: '* GL-based current assets minus payables — matches the dashboard',
       interpretations: [
         '> 0: company can meet financial obligations at any time',

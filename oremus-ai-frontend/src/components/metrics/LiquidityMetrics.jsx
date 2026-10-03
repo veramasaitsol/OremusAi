@@ -89,7 +89,7 @@ export default function LiquidityMetrics({ from, to }) {
             <div className={`text-[clamp(15px,1.6vw,21px)] font-bold tabular-nums truncate ${(data.workingCapital || 0) >= 0 ? 'text-navy-900 dark:text-white' : 'text-red-500'}`}>
               {fmtFull(data.workingCapital || 0)}
             </div>
-            <div className="text-[10.5px] text-navy-400 mt-1">current assets − liabilities</div>
+            <div className="text-[10.5px] text-navy-400 mt-1">current assets − current liabilities</div>
           </div>
         </div>
 

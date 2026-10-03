@@ -14,10 +14,10 @@ import { fmtMoneyCompact } from '../utils/fmt.js';
 import { cn } from '../utils/classNames.js';
 import { toast } from '../utils/toastStore.js';
 
-const fmtPctOrNA  = (v) => (v == null ? 'N/A' : `${v.toFixed(1)}%`);
+const fmtPctOrNA  = (v) => (v == null ? 'N/A' : `${v.toFixed(2)}%`);
 const fmtRatioOrNA = (v) => (v == null ? 'N/A' : v.toFixed(2));
 const fmtTimesOrNA = (v) => (v == null ? 'N/A' : `${v.toFixed(2)}×`);
-const fmtDaysOrNA  = (v) => (v == null ? 'N/A' : `${v.toFixed(1)}d`);
+const fmtDaysOrNA  = (v) => (v == null ? 'N/A' : `${v.toFixed(2)}d`);
 const fmtMoneyOrNA = (currency) => (v) => (v == null ? 'N/A' : fmtMoneyCompact(v, currency));
 
 // One row per ratio: { key, label, formula, fmt }. `fmt` is bound to currency

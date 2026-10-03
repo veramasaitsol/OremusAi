@@ -4,7 +4,7 @@
 // flips the colour for metrics where a fall is good (e.g. burn).
 export const formatGrowth = (value) => {
   const n = Number(value);
-  return `${n >= 0 ? '+' : '-'}${Math.abs(n).toFixed(1)}%`;
+  return `${n >= 0 ? '+' : '-'}${Math.abs(n).toFixed(2)}%`;
 };
 
 export default function GrowthBadge({ value, inverse = false, className = '' }) {
@@ -30,7 +30,7 @@ export default function GrowthBadge({ value, inverse = false, className = '' }) 
 export function showsGrowthOnTile(kpi, displayValue) {
   if (!kpi || kpi.growthOnTile === false) return false;
   if (kpi.delta == null || !Number.isFinite(Number(kpi.delta))) return true; // shows "—"
-  const g = Math.abs(Number(kpi.delta)).toFixed(1);
+  const g = Math.abs(Number(kpi.delta)).toFixed(2);
   const printed = `${String(displayValue ?? '')} ${String(kpi.sub ?? '')}`;
   return !new RegExp(`(^|[^\\d.])${g.replace('.', '\\.')}%`).test(printed);
 }

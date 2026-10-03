@@ -343,18 +343,50 @@ async function revenueByProduct(effUserId, orgId, from, to, customerId, topN = 1
 }
 
 // Recurring vs one-time split from invoices (recurring_invoice_id present).
+// Recurring vs one-time split of the period's invoices. An invoice is
+// recurring when any of these holds:
+//   1. it was raised from a recurring-invoice profile (recurring_invoice_id);
+//   2. its customer has an active Zoho recurring-invoice profile covering the
+//      invoice date (zb_recurring_invoices);
+//   3. its customer is billed regularly — invoiced in at least 3 different
+//      calendar months within the 12 months ending on `to`. Rule 3 carries the
+//      split where profiles aren't synced (QuickBooks, Xero, most Zoho orgs),
+//      and looks back 12 months whatever the selected range, so a single
+//      month still recognises a monthly-billed customer.
+// Recurring % = recurring invoice total ÷ total invoiced in the period × 100.
 async function recurringSplit(effUserId, orgId, from, to, customerId) {
-  const params = [effUserId, orgId, from, to];
+  const custKey = (a) => `COALESCE(NULLIF(${a}zoho_customer_id, ''), ${a}customer_name) COLLATE utf8mb4_unicode_ci`;
+  const params = [effUserId, orgId, to, to, effUserId, orgId, from, to];
   let custClause = '';
-  if (customerId) { custClause = ' AND zoho_customer_id = ?'; params.push(String(customerId)); }
+  if (customerId) { custClause = ' AND i.zoho_customer_id = ?'; params.push(String(customerId)); }
+  const isRecurring = `(
+          (i.recurring_invoice_id IS NOT NULL AND i.recurring_invoice_id <> '')
+          OR reg.ck IS NOT NULL
+          OR EXISTS (
+            SELECT 1 FROM zb_recurring_invoices r
+             WHERE r.org_id COLLATE utf8mb4_unicode_ci = i.org_id COLLATE utf8mb4_unicode_ci
+               AND LOWER(COALESCE(r.status, '')) = 'active' AND COALESCE(r.is_deleted, 0) = 0
+               AND (r.customer_id COLLATE utf8mb4_unicode_ci = i.zoho_customer_id COLLATE utf8mb4_unicode_ci
+                    OR r.customer_name COLLATE utf8mb4_unicode_ci = i.customer_name COLLATE utf8mb4_unicode_ci)
+               AND (r.start_date IS NULL OR r.start_date <= i.date)
+               AND (r.end_date IS NULL OR r.end_date >= i.date)))`;
   const [row] = await safeRows(
     `SELECT
-        SUM(CASE WHEN recurring_invoice_id IS NOT NULL AND recurring_invoice_id <> '' THEN total ELSE 0 END) AS recurring,
-        SUM(CASE WHEN recurring_invoice_id IS NULL OR recurring_invoice_id = '' THEN total ELSE 0 END) AS oneTime
-       FROM invoices
-      WHERE user_id = ? AND org_id = ?
-        AND date >= ? AND date <= ?
-        AND status NOT IN ('void','draft')${custClause}`,
+        SUM(CASE WHEN ${isRecurring} THEN i.total ELSE 0 END) AS recurring,
+        SUM(CASE WHEN ${isRecurring} THEN 0 ELSE i.total END) AS oneTime
+       FROM invoices i
+       LEFT JOIN (
+         SELECT ${custKey('')} AS ck
+           FROM invoices
+          WHERE user_id = ? AND org_id = ?
+            AND date > DATE_SUB(?, INTERVAL 12 MONTH) AND date <= ?
+            AND status NOT IN ('void','draft')
+          GROUP BY ck
+         HAVING COUNT(DISTINCT DATE_FORMAT(date, '%Y-%m')) >= 3
+       ) reg ON reg.ck = ${custKey('i.')}
+      WHERE i.user_id = ? AND i.org_id = ?
+        AND i.date >= ? AND i.date <= ?
+        AND i.status NOT IN ('void','draft')${custClause}`,
     params
   );
   const recurring = Number(row && row.recurring) || 0;
@@ -417,13 +449,33 @@ function churnFromSets(priorSet, currSet) {
   };
 }
 
-// Logo churn: distinct customers who invoiced in the prior comparable period but
-// not in the current period, as a % of prior-period active customers.
+// Logo churn over the selected period. A customer is ACTIVE on a date when it
+// was invoiced in the 12 months up to that date (annual/quarterly billers stay
+// active between invoices). Churn Rate = customers active at the start of the
+// period (12 months before `from`) who are no longer active at the end (12
+// months up to `to`) ÷ customers active at the start × 100. For a full
+// financial year this is "billed last year but not this year"; for a month or
+// quarter it no longer counts a customer as lost just because its invoice
+// falls in a different month.
+function shiftIso(iso, { months = 0, days = 0 }) {
+  const d = new Date(iso + 'T00:00:00Z');
+  const day = d.getUTCDate();
+  if (months) {
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() + months);
+    const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+    d.setUTCDate(Math.min(day, last));
+  }
+  if (days) d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 async function customerChurn(effUserId, orgId, from, to) {
-  const pp = priorPeriod({ from, to });
-  const priorSet = await activeCustomerIds(effUserId, orgId, pp.from, pp.to);
-  const currSet  = await activeCustomerIds(effUserId, orgId, from, to);
-  return churnFromSets(priorSet, currSet);
+  const startTo   = shiftIso(from, { days: -1 });
+  const startFrom = shiftIso(from, { months: -12 });
+  const endFrom   = shiftIso(shiftIso(to, { months: -12 }), { days: 1 });
+  const priorSet = await activeCustomerIds(effUserId, orgId, startFrom, startTo);
+  const currSet  = await activeCustomerIds(effUserId, orgId, endFrom, to);
+  return { ...churnFromSets(priorSet, currSet), activeAtStart: { from: startFrom, to: startTo }, activeAtEnd: { from: endFrom, to } };
 }
 
 // ── Orchestrators ─────────────────────────────────────────────────────────────
@@ -760,13 +812,11 @@ async function getRevenueMetrics(ctx, params, opts = {}) {
     recurring   = await recurringSplit(conn.effectiveUserId, conn.connectionRef, params.from, params.to, params.customer_id);
   } else if (provider === 'quickbooks' || provider === 'xero') {
     const label = provider === 'quickbooks' ? 'QuickBooks' : 'Xero';
-    // Recurring vs one-time: neither provider's synced invoices carry a
-    // recurring-invoice linkage (Zoho-only field) — every invoice reads as
-    // one-time. Still reports the real revenue total for the period (not
-    // zero); it's the recurring/one-time SPLIT that's unknown, not the
-    // revenue itself.
+    // Recurring vs one-time: neither provider syncs recurring-invoice
+    // profiles, so the split comes from the billing pattern (a customer
+    // invoiced in 3+ months of the last 12 — see recurringSplit).
     recurring = await recurringSplit(conn.effectiveUserId, conn.connectionRef, params.from, params.to, null);
-    meta.warnings.push(`${label} does not sync recurring-invoice linkage; the recurring split reflects 0 invoices flagged recurring, not a confirmed 0% recurring-revenue business.`);
+    meta.warnings.push(`${label} does not sync recurring-invoice profiles; recurring revenue is identified from the billing pattern (customers invoiced in 3 or more months of the last 12).`);
     // recurring.total is summed from synced INVOICE records only, unlike the
     // headline `revenue` above (which now comes from ${label}'s own P&L report
     // and can include income never invoiced through this sync — journals,

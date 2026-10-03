@@ -58,7 +58,7 @@ export default function CashFlowMetrics({ from, to, basis, customer, currency })
         month: d.month,
         position,
         runway: avgBurn > 0 && position > 0
-          ? parseFloat(Math.min(60, position / avgBurn).toFixed(1))
+          ? parseFloat(Math.min(60, position / avgBurn).toFixed(2))
           : 0,
       };
     });

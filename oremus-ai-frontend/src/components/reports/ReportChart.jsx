@@ -77,7 +77,7 @@ function ChartTooltip({ active, payload, label, columnNames = {}, isPie = false,
                 {fmt(value, { currency })}
               </span>
               {pct != null && (
-                <span className="w-12 text-right tabular-nums text-navy-400">{pct.toFixed(1)}%</span>
+                <span className="w-12 text-right tabular-nums text-navy-400">{pct.toFixed(2)}%</span>
               )}
             </div>
           );

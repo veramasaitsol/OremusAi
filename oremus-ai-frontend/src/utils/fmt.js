@@ -55,14 +55,14 @@ export function fmtMoneyCompact(n, currency = _activeCurrency) {
   const abs = Math.abs(n);
   const s = n < 0 ? '-' : '';
   if (String(currency).toUpperCase() === 'INR') {
-    if (abs >= 1e7) return `${s}${sym}${(abs / 1e7).toFixed(1)}Cr`;
-    if (abs >= 1e5) return `${s}${sym}${(abs / 1e5).toFixed(1)}L`;
+    if (abs >= 1e7) return `${s}${sym}${(abs / 1e7).toFixed(2)}Cr`;
+    if (abs >= 1e5) return `${s}${sym}${(abs / 1e5).toFixed(2)}L`;
     if (abs >= 1e3) return `${s}${sym}${(abs / 1e3).toFixed(0)}k`;
     return `${s}${sym}${Math.round(abs)}`;
   }
-  if (abs >= 1e9) return `${s}${sym}${(abs / 1e9).toFixed(1)}B`;
-  if (abs >= 1e6) return `${s}${sym}${(abs / 1e6).toFixed(1)}M`;
-  if (abs >= 1e3) return `${s}${sym}${(abs / 1e3).toFixed(1)}k`;
+  if (abs >= 1e9) return `${s}${sym}${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${s}${sym}${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${s}${sym}${(abs / 1e3).toFixed(2)}k`;
   return `${s}${sym}${Math.round(abs)}`;
 }
 
@@ -73,8 +73,8 @@ export function fmtPct(n, dec = 1) {
 
 export function fmtCompact(n) {
   if (n == null || isNaN(n)) return '0';
-  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(2) + 'k';
   return String(n);
 }
 
