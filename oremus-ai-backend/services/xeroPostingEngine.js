@@ -116,7 +116,10 @@ const POSTING_STATUS = {
   invoice:       new Set(['AUTHORISED', 'PAID']),   // ACCREC / ACCPAY
   creditnote:    new Set(['AUTHORISED', 'PAID']),
   banktxn:       new Set(['AUTHORISED']),           // else DELETED
-  manualjournal: new Set(['POSTED']),               // else DRAFT / VOIDED / DELETED
+  // ARCHIVED journals still post: Xero archives old journals to hide them from
+  // the journal list, but they stay in its Trial Balance / Balance Sheet.
+  // Skipping them dropped years of provision and year-end entries.
+  manualjournal: new Set(['POSTED', 'ARCHIVED']),   // else DRAFT / VOIDED / DELETED
 };
 const posts = (kind, status) => POSTING_STATUS[kind].has(String(status || '').toUpperCase());
 
@@ -238,7 +241,7 @@ function buildInvoiceLines(inv, accounts) {
     const net  = num(li.LineAmount);
     if (net === 0) continue;
     // Sales: credit revenue. Purchase: debit expense/asset.
-    lines.push({ account: acct, debit: isSales ? 0 : net, credit: isSales ? net : 0, taxType: li.TaxType, tax: num(li.TaxAmount) });
+    lines.push({ account: acct, debit: isSales ? 0 : net, credit: isSales ? net : 0, taxType: li.TaxType, tax: num(li.TaxAmount), _item: true });
   }
   if (totalTax !== 0 && taxAcct) {
     lines.push({ account: taxAcct, debit: isSales ? 0 : totalTax, credit: isSales ? totalTax : 0 });
@@ -284,7 +287,7 @@ function buildCreditNoteLines(cn, accounts) {
     const net  = num(li.LineAmount);
     if (net === 0) continue;
     // Reverse of invoice: sales-credit debits revenue, purchase-credit credits expense.
-    lines.push({ account: acct, debit: isSalesCredit ? net : 0, credit: isSalesCredit ? 0 : net, taxType: li.TaxType, tax: num(li.TaxAmount) });
+    lines.push({ account: acct, debit: isSalesCredit ? net : 0, credit: isSalesCredit ? 0 : net, taxType: li.TaxType, tax: num(li.TaxAmount), _item: true });
   }
   if (totalTax !== 0 && taxAcct) {
     lines.push({ account: taxAcct, debit: isSalesCredit ? totalTax : 0, credit: isSalesCredit ? 0 : totalTax });
@@ -306,7 +309,7 @@ function buildBankLines(bt, accounts) {
     const net  = num(li.LineAmount);
     if (net === 0) continue;
     // Receive: credit income line; Spend: debit expense line.
-    lines.push({ account: acct, debit: isReceive ? 0 : net, credit: isReceive ? net : 0, taxType: li.TaxType, tax: num(li.TaxAmount) });
+    lines.push({ account: acct, debit: isReceive ? 0 : net, credit: isReceive ? net : 0, taxType: li.TaxType, tax: num(li.TaxAmount), _item: true });
   }
   if (totalTax !== 0) {
     const taxAcct = isReceive ? accounts.outputTax : accounts.inputTax;
@@ -350,6 +353,62 @@ function buildManualJournalLines(mj, accounts) {
 // Xero actually banked (p.BankAmount for a base-currency bank), and an FX line
 // the gap. Native debit/credit are unchanged (the FX line is base-only), so the
 // native-currency ledger checks are unaffected. `fx` = { docRate, homeCurrency }.
+// ── Prepayments ─────────────────────────────────────────────────────────────
+// A prepayment (SPEND-/RECEIVE-PREPAYMENT bank transaction) is posted to its
+// line-item accounts, which only HOLD it until Xero allocates it to a bill or
+// invoice. Each allocation moves the allocated share back out of those
+// accounts into AP/AR (Dr AP / Cr line accounts for a supplier prepayment,
+// Dr line accounts / Cr AR for a customer one); a cash refund moves it out
+// against the bank instead. Without these, an allocated prepayment stayed in
+// its holding account for ever — e.g. a salary prepayment kept "Salaries
+// Payable" at 45 lakh and left AP short by the same amount, which the TB
+// true-up then pushed into every earlier year.
+
+// The prepayment's own line-item and tax lines, reversed and scaled to
+// `amount` (≤ its Total), summing exactly to `amount`.
+function prepaymentReversalLines(pp, amount, accounts) {
+  const total = num(pp.Total);
+  if (!total || !amount) return [];
+  const posted = buildBankLines({ ...pp, BankAccount: null }, accounts);
+  posted.pop(); // the bank line — the caller supplies the other side
+  // Lines + tax must equal Total (a line discount is spread like balance() does).
+  const sum = posted.reduce((t, l) => t + l.debit - l.credit, 0);
+  const isReceive = String(pp.Type || '').toUpperCase().startsWith('RECEIVE');
+  const gap = +((isReceive ? -total : total) - sum).toFixed(2);
+  if (gap) spreadOverItems(posted, -gap);
+  const f = amount / total;
+  const out = posted.map((l) => ({
+    account: l.account, _item: l._item,
+    debit: +(l.credit * f).toFixed(2), credit: +(l.debit * f).toFixed(2),
+  }));
+  const net = out.reduce((t, l) => t + l.debit - l.credit, 0);
+  const want = isReceive ? amount : -amount; // receive: lines become debits
+  const fix = +(want - net).toFixed(2);
+  if (fix) spreadOverItems(out, -fix);
+  return out.filter((l) => l.debit || l.credit);
+}
+
+// One allocation of a prepayment to a bill/invoice.
+function buildPrepaymentAllocationLines(pp, amount, accounts) {
+  const isReceive = String(pp.Type || '').toUpperCase().startsWith('RECEIVE');
+  const control = isReceive ? accounts.ar : accounts.ap;
+  if (!control) return [];
+  const lines = prepaymentReversalLines(pp, num(amount), accounts);
+  if (!lines.length) return [];
+  lines.push({ account: control, debit: isReceive ? 0 : num(amount), credit: isReceive ? num(amount) : 0 });
+  return lines;
+}
+
+// Xero payment types that refund cash against AP ('ap') or AR ('ar').
+// Prepayment refunds (APPREPAYMENTPAYMENT / ARPREPAYMENTPAYMENT) reverse the
+// prepayment's holding accounts instead — see buildPaymentLines.
+const REFUND_PAYMENT_SIDE = {
+  APOVERPAYMENTPAYMENT: 'ap',
+  APCREDITPAYMENT:      'ap',
+  AROVERPAYMENTPAYMENT: 'ar',
+  ARCREDITPAYMENT:      'ar',
+};
+
 function buildPaymentLines(p, accounts, fx = {}) {
   const amount = num(p.Amount);
   if (amount === 0) return [];
@@ -357,6 +416,56 @@ function buildPaymentLines(p, accounts, fx = {}) {
   // A real synced account carries `group`; an unresolved id does not.
   if (!bank || !bank.id || !bank.group) return [];
   const type = String(p.PaymentType || '').toUpperCase();
+
+  // Cash refund of an overpayment or a credit note. The overpayment (a bank
+  // transaction) and the credit note already sit in AR/AP, so the refund settles
+  // straight against AR/AP, not the clearing account: a supplier refund is
+  // Dr Bank / Cr AP, a refund to a customer is Dr AR / Cr Bank. These used to be
+  // skipped, leaving AP/AR and the bank off by every refund (e.g. a 21,426.50
+  // "Payable Overpayment Refund") until the Trial-Balance true-up hid it in the
+  // 2015 opening plug, misstating every historical date.
+  const refundSide = REFUND_PAYMENT_SIDE[type];
+  if (refundSide) {
+    const control = refundSide === 'ap' ? accounts.ap : accounts.ar;
+    if (!control) return [];
+    const intoBank = refundSide === 'ap';
+    const bankLine = { account: bank,    debit: intoBank ? amount : 0, credit: intoBank ? 0 : amount };
+    const ctrlLine = { account: control, debit: intoBank ? 0 : amount, credit: intoBank ? amount : 0 };
+    const rate = num(p.CurrencyRate) > 0 ? num(p.CurrencyRate) : 1;
+    if (rate !== 1) {
+      // One base amount for both legs, so the entry stays balanced: what the
+      // home-currency bank actually moved, else native ÷ the payment's rate.
+      const bankIsBase = !bank.currency || !fx.homeCurrency || bank.currency === fx.homeCurrency;
+      const base = bankIsBase && num(p.BankAmount) > 0 ? r6(num(p.BankAmount)) : r6(amount / rate);
+      for (const ln of [bankLine, ctrlLine]) {
+        ln.baseDebit = ln.debit ? base : 0;
+        ln.baseCredit = ln.credit ? base : 0;
+        ln.rate = rate;
+      }
+    }
+    return [bankLine, ctrlLine];
+  }
+
+  // Cash refund of a prepayment: reverse its holding (line) accounts against
+  // the bank. Needs the full prepayment (from /Prepayments) for its lines.
+  if (type === 'APPREPAYMENTPAYMENT' || type === 'ARPREPAYMENTPAYMENT') {
+    const pp = fx.prepaymentsById?.get(String(p.Prepayment?.PrepaymentID || ''));
+    if (!pp) return [];
+    const intoBank = type === 'APPREPAYMENTPAYMENT';
+    const lines = prepaymentReversalLines({ ...pp, Type: intoBank ? 'SPEND-PREPAYMENT' : 'RECEIVE-PREPAYMENT' }, amount, accounts);
+    if (!lines.length) return [];
+    lines.push({ account: bank, debit: intoBank ? amount : 0, credit: intoBank ? 0 : amount });
+    const rate = num(p.CurrencyRate) > 0 ? num(p.CurrencyRate) : 1;
+    if (rate !== 1) {
+      for (const ln of lines) {
+        ln.baseDebit = r6(ln.debit / rate);
+        ln.baseCredit = r6(ln.credit / rate);
+        ln.rate = rate;
+      }
+    }
+    return lines;
+  }
+
   const invType = String(p.Invoice?.Type || '').toUpperCase();
   const isReceive = type === 'ACCRECPAYMENT' || (!type && invType === 'ACCREC');
   const isSpend   = type === 'ACCPAYPAYMENT' || (!type && invType === 'ACCPAY');
@@ -370,11 +479,13 @@ function buildPaymentLines(p, accounts, fx = {}) {
   const docRate = num(fx.docRate) > 0 ? num(fx.docRate) : 1;
   const payRate = num(p.CurrencyRate) > 0 ? num(p.CurrencyRate) : docRate;
   if ((docRate !== 1 || payRate !== 1) && accounts.realisedFx) {
-    const contraBase = r2(amount / docRate);
+    // Converted amounts keep full precision (rounded to 6 dp only to drop float
+    // noise); reports round once, on the totals they print.
+    const contraBase = r6(amount / docRate);
     const bankIsBase = !bank.currency || !fx.homeCurrency || bank.currency === fx.homeCurrency;
     const bankBase = bankIsBase && p.BankAmount != null && num(p.BankAmount) > 0
-      ? r2(num(p.BankAmount))
-      : r2(amount / payRate);
+      ? r6(num(p.BankAmount))
+      : r6(amount / payRate);
     const setBase = (ln, base, rate) => {
       ln.baseDebit = ln.debit ? base : 0;
       ln.baseCredit = ln.credit ? base : 0;
@@ -384,7 +495,7 @@ function buildPaymentLines(p, accounts, fx = {}) {
     setBase(bankLine, bankBase, payRate);
     // Expense-positive loss: a receipt banks less than the AR it relieves; a
     // payment spends more than the AP it relieves.
-    const loss = r2(isReceive ? contraBase - bankBase : bankBase - contraBase);
+    const loss = r6(isReceive ? contraBase - bankBase : bankBase - contraBase);
     const lines = isReceive ? [bankLine, contraLine] : [contraLine, bankLine];
     if (loss !== 0) {
       lines.push({
@@ -419,6 +530,13 @@ function balance(lines, controlAcct, roundingAcct = null) {
   let dr = 0; let cr = 0;
   for (const l of lines) { dr += l.debit; cr += l.credit; }
   const residual = +(dr - cr).toFixed(2);
+  // A rupee or more between a document's line items and its Total is a
+  // line-level discount/adjustment Xero applied to the line items — never to
+  // the control or bank account, which Xero always books at the document
+  // Total. Putting it on AP/AR/bank (as before) left them off Xero by that
+  // amount and the line accounts overstated (e.g. a bill whose lines summed
+  // 5.83 over its Total). So spread it across the item lines.
+  if (Math.abs(residual) >= 1 && spreadOverItems(lines, residual)) return lines;
   const target = roundingAcct && Math.abs(residual) < 1 ? roundingAcct : controlAcct;
   if (Math.abs(residual) >= 0.01 && target) {
     // residual > 0 → too much debit → add a credit to balance.
@@ -430,6 +548,25 @@ function balance(lines, controlAcct, roundingAcct = null) {
     });
   }
   return lines;
+}
+
+// Absorb `residual` (debits − credits) into the lines flagged `_item`,
+// pro rata to their size; the last cent goes on the largest so the document
+// balances exactly. Returns false when there is no item line to carry it.
+function spreadOverItems(lines, residual) {
+  const items = lines.filter((l) => l._item && (l.debit || l.credit));
+  const size = items.reduce((t, l) => t + Math.abs(l.debit || l.credit), 0);
+  if (!items.length || !size) return false;
+  let left = residual;
+  items.sort((a, b) => Math.abs(b.debit || b.credit) - Math.abs(a.debit || a.credit));
+  items.forEach((l, i) => {
+    const share = i === items.length - 1 ? left : +(residual * Math.abs(l.debit || l.credit) / size).toFixed(2);
+    // Too much debit → shrink debit lines / grow credit lines (and vice versa).
+    if (l.debit) l.debit = +(l.debit - share).toFixed(2);
+    else l.credit = +(l.credit + share).toFixed(2);
+    left = +(left - share).toFixed(2);
+  });
+  return true;
 }
 
 // ── Persist one document's balanced lines to the staging table ──────────────
@@ -485,9 +622,12 @@ async function writeDoc(conn, { userId, orgId, sourceType, sourceId, date, ref, 
         currency || null,
         // A line may carry its own base amounts (a payment's bank leg at the
         // payment rate, a base-only realised-FX line); otherwise native ÷ doc rate.
+        // Stored at full precision (6 dp) — NOT rounded per line, which lost
+        // up to half a paisa/cent on every converted line and added up across
+        // the ledger. Reports round once, on the totals they print.
         ln.rate > 0 ? ln.rate : rate, baseCurrency || null,
-        ln.baseDebit != null ? +Number(ln.baseDebit).toFixed(2) : +(debit / rate).toFixed(2),
-        ln.baseCredit != null ? +Number(ln.baseCredit).toFixed(2) : +(credit / rate).toFixed(2),
+        ln.baseDebit != null ? r6(ln.baseDebit) : r6(debit / rate),
+        ln.baseCredit != null ? r6(ln.baseCredit) : r6(credit / rate),
       ]
     );
     i += 1;
@@ -504,7 +644,7 @@ async function buildStagingLedger(userId, opts = {}) {
   // endpoint 401s for a given connection, fetchEntity records the error, the
   // clean wipe is skipped, and the trial-balance true-up covers the banks as
   // before — no regression. banktransfers is included for multi-bank orgs.
-  const { maxPages = 0, fresh = true, entities = ['invoices', 'creditnotes', 'banktransactions', 'manualjournals', 'banktransfers', 'payments'] } = opts;
+  const { maxPages = 0, fresh = true, entities = ['invoices', 'creditnotes', 'banktransactions', 'manualjournals', 'banktransfers', 'payments', 'prepayments'] } = opts;
   const auth = await getValidXeroToken(userId);
   if (!auth) throw new Error('Xero not connected for this user');
   const orgId = auth.tenantId;
@@ -548,12 +688,17 @@ async function buildStagingLedger(userId, opts = {}) {
     fetchEntity('payments', 'Payments'),
     fetchEntity('banktransfers', 'BankTransfers'),
   ]);
+  // Prepayments only add their allocations / refunds; if this connection
+  // can't read them, the rebuild still runs exactly as it did before.
+  const pps = await fetchEntity('prepayments', 'Prepayments');
+  const prepaymentsById = new Map((pps || []).map((pp) => [String(pp.PrepaymentID), pp]));
 
   // A clean wipe-and-rebuild is only safe when EVERY requested entity fetched
   // OK. On a partial fetch we skip the wipe and let writeDoc's ON DUPLICATE KEY
   // UPDATE refresh what we did get, so a rate-limited run never empties the
   // ledger (the next full sync reconciles).
-  const allFetched = entities.every((k) => errors[k] == null);
+  const OPTIONAL_ENTITIES = new Set(['prepayments']);
+  const allFetched = entities.every((k) => OPTIONAL_ENTITIES.has(k) || errors[k] == null);
 
   const conn = await pool.getConnection();
   try {
@@ -618,6 +763,30 @@ async function buildStagingLedger(userId, opts = {}) {
       stats.banktransactions = { docs: bts.length, lines };
     }
 
+    if (pps) {
+      let lines = 0; let allocations = 0;
+      for (const pp of pps) {
+        if (!['AUTHORISED', 'PAID'].includes(String(pp.Status || '').toUpperCase())) continue; // VOIDED
+        const allocs = pp.Allocations || [];
+        for (let i = 0; i < allocs.length; i += 1) {
+          const a = allocs[i];
+          const built = buildPrepaymentAllocationLines(pp, num(a.Amount), accounts);
+          if (!built.length) continue;
+          allocations += 1;
+          // eslint-disable-next-line no-await-in-loop
+          lines += await writeDoc(conn, {
+            userId, orgId, sourceType: 'PrepaymentAllocation', sourceId: `${pp.PrepaymentID}:alloc:${i}`,
+            date: toDate(a.DateString || a.Date), ref: a.Invoice?.InvoiceNumber || pp.Reference,
+            details: pp.Contact?.Name, currency: pp.CurrencyCode || homeCurrency,
+            exchangeRate: pp.CurrencyRate, baseCurrency: homeCurrency,
+          }, built);
+        }
+      }
+      stats.prepayments = { docs: pps.length, allocations, lines };
+    } else if (errors.prepayments) {
+      stats.prepayments = { skipped: errors.prepayments };
+    }
+
     if (mjs) {
       let lines = 0;
       for (const mj of mjs) {
@@ -644,12 +813,20 @@ async function buildStagingLedger(userId, opts = {}) {
       // default 1 (which would under-report a foreign-currency settlement).
       const invoiceRateById = new Map((invs || []).map((inv) => [inv.InvoiceID, inv.CurrencyRate]));
       let lines = 0; let posted = 0;
+      const unposted = {}; // PaymentType → count, so a dropped kind shows in the stats
       for (const p of pays) {
         if (String(p.Status || '').toUpperCase() !== 'AUTHORISED') continue; // skip DELETED
         const docRate = p.Invoice?.CurrencyRate ?? invoiceRateById.get(p.Invoice?.InvoiceID);
-        const built = buildPaymentLines(p, accounts, { docRate, homeCurrency });
-        if (!built.length) continue;
+        const built = buildPaymentLines(p, accounts, { docRate, homeCurrency, prepaymentsById });
+        if (!built.length) {
+          const k = p.PaymentType || 'UNKNOWN';
+          unposted[k] = (unposted[k] || 0) + 1;
+          continue;
+        }
         posted += 1;
+        // A refund carries the credit note / overpayment it settles instead of
+        // an Invoice stub.
+        const doc = p.Invoice || p.CreditNote || p.Overpayment || p.Prepayment || null;
         // eslint-disable-next-line no-await-in-loop
         // A Payment settles in the currency of the Invoice/CreditNote it's
         // applied to — use that document's own CurrencyCode; only fall back
@@ -657,13 +834,13 @@ async function buildStagingLedger(userId, opts = {}) {
         // Invoice context available here.
         lines += await writeDoc(conn, {
           userId, orgId, sourceType: p.PaymentType || 'Payment', sourceId: p.PaymentID,
-          date: toDate(p.Date), ref: p.Reference || p.Invoice?.InvoiceNumber,
-          details: p.Invoice?.Contact?.Name, currency: p.Invoice?.CurrencyCode || homeCurrency,
+          date: toDate(p.Date), ref: p.Reference || doc?.InvoiceNumber || doc?.CreditNoteNumber,
+          details: doc?.Contact?.Name, currency: doc?.CurrencyCode || homeCurrency,
           exchangeRate: docRate,
           baseCurrency: homeCurrency,
         }, built);
       }
-      stats.payments = { docs: pays.length, posted, lines };
+      stats.payments = { docs: pays.length, posted, lines, unposted };
     }
 
     if (xfers) {
@@ -760,6 +937,10 @@ async function promoteLedger(userId, orgId) {
 // re-running never double-counts. Graceful: any token / rate-limit / scope
 // failure is caught and the sync still succeeds (just without the true-up).
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// Converted (base-currency) amounts are kept at full precision; 6 dp only
+// strips floating-point noise. Matches account_transactions.base_debit/credit
+// DECIMAL(20,6) (ensureBasePrecision).
+const r6 = (n) => Math.round((Number(n) || 0) * 1e6) / 1e6;
 
 // ── Report-time figures Xero never journals to a synced document ─────────────
 // Two P&L amounts exist in Xero with no source document any endpoint available
@@ -772,7 +953,9 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 // So we read Xero's own monthly P&L (standard layout, 12 months per call) and
 // post, per month, (Xero's figure − what our ledger already holds) — the
 // realised-FX account for FX, the Rounding account for Rounding. Each is a
-// base-only pair against Accounts Receivable (native 0); the Trial-Balance
+// base-only pair (native 0): FX against Accounts Receivable — Xero's Trial
+// Balance carries AR revalued at the report date, which documents + these
+// rows reproduce exactly — and Rounding against a bank account; the Trial-Balance
 // true-up that runs next keeps the Balance Sheet exact. Months telescope, so any
 // month-aligned report period sums correctly.
 const ROUNDING_ADJ_LIMIT = 100; // a larger "rounding" gap means missing data, not rounding
@@ -814,7 +997,16 @@ async function syncXeroMonthlyAdjustments(userId, orgId) {
     // Xero's earlier columns reuse the base period's end DAY, so a base ending on
     // the 30th cuts every earlier 31-day month short. Only a 31-day base month can
     // carry a 12-month block; any other month is fetched on its own.
-    const periods = last === 31 ? Math.min(11, monthsLeft) : 0;
+    // The month the ledger ends in is read only up to the ledger's last day —
+    // the date the Trial-Balance true-up is taken as-at. Xero revalues open
+    // foreign balances at the report's END date, so reading that month to its
+    // month-end valued AR at a different day's rate than the true-up's Trial
+    // Balance, and the gap (₹45,126.74 on one org) landed in the 2015 opening
+    // plug, misstating AR and Retained Earnings on every historical date.
+    const monthEnd = `${monthKey(y, m)}-${String(last).padStart(2, '0')}`;
+    const partial = asOf < monthEnd;
+    const toDate = partial ? asOf : monthEnd;
+    const periods = !partial && last === 31 ? Math.min(11, monthsLeft) : 0;
     let report;
     try {
       const res = await withRetry(() => axios.get(`${XERO_API_BASE}/Reports/ProfitAndLoss`, {
@@ -822,7 +1014,7 @@ async function syncXeroMonthlyAdjustments(userId, orgId) {
         // standardLayout: a client's custom report layout could rename or group
         // these lines. Xero accepts periods 1..11 only; a single month omits both.
         params: {
-          fromDate: `${monthKey(y, m)}-01`, toDate: `${monthKey(y, m)}-${last}`, standardLayout: true,
+          fromDate: `${monthKey(y, m)}-01`, toDate, standardLayout: true,
           ...(periods > 0 ? { periods, timeframe: 'MONTH' } : {}),
         },
       }));
@@ -838,9 +1030,15 @@ async function syncXeroMonthlyAdjustments(userId, orgId) {
     const fxRow = rowFor((a) => a.Value === 'FXGROUPID');
     const rndRow = roundingId ? rowFor((a) => a.Id === 'account' && String(a.Value) === roundingId) : null;
     cols.slice(1).forEach((c, i) => {
-      const [, mon, yy] = String(c.Value || '').split(' '); // "31 Mar 26"
-      if (!MON[mon]) return;
-      const k = monthKey(2000 + Number(yy), MON[mon]);
+      // A single-month fetch is the month we asked for (its header may read
+      // "5 Oct 26" or a range when it ends mid-month); a block is labelled
+      // per column, "31 Mar 26".
+      let k = periods === 0 && i === 0 ? monthKey(y, m) : null;
+      if (!k) {
+        const [, mon, yy] = String(c.Value || '').split(' ');
+        if (!MON[mon]) return;
+        k = monthKey(2000 + Number(yy), MON[mon]);
+      }
       fxByMonth[k] = num(fxRow?.Cells?.[i + 1]?.Value);
       roundingByMonth[k] = num(rndRow?.Cells?.[i + 1]?.Value);
     });
@@ -874,13 +1072,45 @@ async function syncXeroMonthlyAdjustments(userId, orgId) {
     [userId, String(orgId)]
   );
 
-  const post = async ({ prefix, ym, amt, account, details, txnType, sourceType }) => {
+  // Xero books a bank-reconciliation adjustment between Rounding and the BANK
+  // account being reconciled — never Accounts Receivable (its AR ledger has no
+  // such lines, and its Trial Balance AR excludes them). The P&L doesn't name
+  // the bank, so each month's adjustment goes to the home-currency bank
+  // account with the most activity that month (else the most active one
+  // overall). AR stays only as a last resort for an org with no bank account.
+  const homeBanks = [...accounts.byId.values()].filter((a) => String(a.type || '').toUpperCase() === 'BANK'
+    && (!a.currency || !homeCurrency || a.currency === homeCurrency));
+  const bankByMonth = {};
+  let busiestBank = null;
+  if (homeBanks.length) {
+    const [act] = await pool.query(
+      `SELECT DATE_FORMAT(transaction_date, '%Y-%m') AS ym, account_id, COUNT(*) AS n
+         FROM account_transactions
+        WHERE user_id = ? AND org_id = ? AND platform = 'xero'
+          AND transaction_id LIKE 'xero:%' AND account_id IN (?)
+        GROUP BY ym, account_id`,
+      [userId, String(orgId), homeBanks.map((a) => String(a.id))]
+    );
+    const total = new Map();
+    const best = {};
+    for (const r of act) {
+      const n = num(r.n);
+      total.set(r.account_id, (total.get(r.account_id) || 0) + n);
+      if (!best[r.ym] || n > best[r.ym].n) best[r.ym] = { id: r.account_id, n };
+    }
+    for (const [ym, b] of Object.entries(best)) bankByMonth[ym] = accounts.byId.get(String(b.id));
+    const top = [...total.entries()].sort((a, b) => b[1] - a[1])[0];
+    busiestBank = (top && accounts.byId.get(String(top[0]))) || homeBanks[0];
+  }
+  const roundingContra = (ym) => bankByMonth[ym] || busiestBank || accounts.ar;
+
+  const post = async ({ prefix, ym, amt, account, contra = accounts.ar, details, txnType, sourceType }) => {
     const [yy, mm] = ym.split('-').map(Number);
     const monthEnd = `${ym}-${String(new Date(Date.UTC(yy, mm, 0)).getUTCDate()).padStart(2, '0')}`;
     const date = monthEnd < asOf ? monthEnd : asOf; // never past the ledger's last day (true-up as-at)
     const lines = [
       { account,         baseDebit: amt > 0 ? amt : 0,  baseCredit: amt < 0 ? -amt : 0 },
-      { account: accounts.ar, baseDebit: amt < 0 ? -amt : 0, baseCredit: amt > 0 ? amt : 0 },
+      { account: contra,      baseDebit: amt < 0 ? -amt : 0, baseCredit: amt > 0 ? amt : 0 },
     ];
     for (let i = 0; i < lines.length; i += 1) {
       const ln = lines[i];
@@ -904,7 +1134,7 @@ async function syncXeroMonthlyAdjustments(userId, orgId) {
   let posted = 0; let rounding = 0; const skippedRounding = [];
   for (const ym of Object.keys(fxByMonth)) {
     if (accounts.unrealisedFx) {
-      const amt = r2(fxByMonth[ym] - (realisedByMonth[ym] || 0)); // expense-positive
+      const amt = r6(fxByMonth[ym] - (realisedByMonth[ym] || 0)); // expense-positive
       if (amt !== 0) {
         // eslint-disable-next-line no-await-in-loop
         await post({ prefix: 'xero-fxu', ym, amt, account: accounts.unrealisedFx,
@@ -913,10 +1143,10 @@ async function syncXeroMonthlyAdjustments(userId, orgId) {
       }
     }
     if (accounts.rounding) {
-      const amt = r2((roundingByMonth[ym] || 0) - (ourRoundingByMonth[ym] || 0));
+      const amt = r6((roundingByMonth[ym] || 0) - (ourRoundingByMonth[ym] || 0));
       if (amt !== 0 && Math.abs(amt) < ROUNDING_ADJ_LIMIT) {
         // eslint-disable-next-line no-await-in-loop
-        await post({ prefix: 'xero-rnd', ym, amt, account: accounts.rounding,
+        await post({ prefix: 'xero-rnd', ym, amt, account: accounts.rounding, contra: roundingContra(ym),
           details: 'Reconciliation adjustments (Xero, monthly total)', txnType: 'Adjustment', sourceType: 'xero-rounding-adjustment' });
         rounding += 1;
       } else if (amt !== 0) {
@@ -1025,7 +1255,7 @@ async function trueUpFromTrialBalance(userId, orgId) {
   // leave a foreign-currency account off by (base − native) on the BS/TB.
   const [ours] = await pool.execute(
     `SELECT account_id, account_name, account_group, account_type_code,
-            ROUND(SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)), 2) AS net
+            SUM(COALESCE(base_debit, debit)) - SUM(COALESCE(base_credit, credit)) AS net
        FROM account_transactions
       WHERE user_id = ? AND org_id = ? AND platform = 'xero'
         AND transaction_id NOT LIKE 'xero-recon:%'
@@ -1039,7 +1269,7 @@ async function trueUpFromTrialBalance(userId, orgId) {
   const ourMeta = {};
   for (const r of ours) {
     const id = String(r.account_id);
-    ourNet[id] = r2((ourNet[id] || 0) + num(r.net));
+    ourNet[id] = r6((ourNet[id] || 0) + num(r.net));
     if (!ourMeta[id]) ourMeta[id] = { name: r.account_name, group: r.account_group, typeCode: r.account_type_code };
   }
 
@@ -1182,13 +1412,23 @@ async function verifyXeroLedger(userId, orgId, opts = {}) {
   const orphan = {};
   const dateOff = {};
   for (const [st, tbl] of [['ACCREC', 'invoices'], ['ACCPAY', 'bills']]) {
+    // Compare in the header column's OWN collation so its xero_id index is used
+    // (forcing another collation onto h.xero_id made the bills check a full
+    // nested scan — ~12 s for one org).
+    // eslint-disable-next-line no-await-in-loop
+    const [[col]] = await pool.execute(
+      `SELECT COLLATION_NAME AS coll FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'xero_id'`,
+      [tbl]
+    );
+    const coll = /^[a-z0-9_]+$/i.test(col?.coll || '') ? col.coll : 'utf8mb4_unicode_ci';
     // eslint-disable-next-line no-await-in-loop
     const [[o]] = await pool.execute(
       `SELECT COUNT(DISTINCT at.source_id) n
          FROM account_transactions at
          LEFT JOIN \`${tbl}\` h
            ON h.user_id = at.user_id
-          AND h.xero_id = at.source_id COLLATE utf8mb4_unicode_ci
+          AND h.xero_id = at.source_id COLLATE ${coll}
         WHERE at.user_id=? AND at.org_id=? AND at.platform='xero'
           AND at.source_type=? AND h.xero_id IS NULL`,
       [userId, oid, st]
@@ -1201,7 +1441,7 @@ async function verifyXeroLedger(userId, orgId, opts = {}) {
            FROM account_transactions at
            JOIN \`${tbl}\` h
              ON h.user_id = at.user_id
-            AND h.xero_id = at.source_id COLLATE utf8mb4_unicode_ci
+            AND h.xero_id = at.source_id COLLATE ${coll}
           WHERE at.user_id=? AND at.org_id=? AND at.platform='xero' AND at.source_type=?
           GROUP BY at.source_id
           HAVING SUM(DATE(at.transaction_date)=DATE(h.date)) = 0
@@ -1232,7 +1472,30 @@ async function verifyXeroLedger(userId, orgId, opts = {}) {
 // ── Orchestrator: rebuild staging from Xero docs, then promote to the shared
 // ledger so DB-backed Xero reports reflect the latest sync. Returns the build
 // stats + promoted row count. maxPages caps pages/entity for quick runs (0=all).
+// Converted amounts are stored at full precision: widen base_debit/base_credit
+// from DECIMAL(15,2) to DECIMAL(20,6) once (idempotent, a no-op when already
+// done — see db/base-amount-precision.sql). Widening never loses data.
+let basePrecisionChecked = false;
+async function ensureBasePrecision() {
+  if (basePrecisionChecked) return;
+  const [cols] = await pool.execute(
+    `SELECT COLUMN_NAME, NUMERIC_SCALE FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'account_transactions'
+        AND COLUMN_NAME IN ('base_debit', 'base_credit')`
+  );
+  const narrow = cols.filter((c) => Number(c.NUMERIC_SCALE) < 6).map((c) => c.COLUMN_NAME);
+  if (narrow.length) {
+    await pool.execute(
+      `ALTER TABLE account_transactions ${narrow.map((c) => `MODIFY ${c} DECIMAL(20,6) NULL`).join(', ')}`
+    );
+    console.log(`[Xero] widened account_transactions.${narrow.join('/')} to DECIMAL(20,6)`);
+  }
+  basePrecisionChecked = true;
+}
+
 async function rebuildXeroLedger(userId, opts = {}) {
+  try { await ensureBasePrecision(); }
+  catch (e) { console.warn('[Xero] base precision upgrade skipped:', e.message); }
   const build = await buildStagingLedger(userId, opts);
   const promoted = await promoteLedger(userId, build.orgId);
   // Before the true-up, so its per-account plugs account for these rows.
@@ -1269,6 +1532,7 @@ module.exports = {
   buildBankLines,
   buildManualJournalLines,
   buildPaymentLines,
+  buildPrepaymentAllocationLines,
   buildBankTransferLines,
   balance,
 };

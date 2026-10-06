@@ -457,6 +457,27 @@ function sumQboPL(rows) {
 // xeroProfitAndLoss's recombination + 15-min in-process cache. Scoped to the SAME
 // from/to the caller passes — whatever period the dashboard's date picker
 // (Month/Quarter/Year/custom) has selected.
+// Home currency of a QuickBooks company: the active realm's (when the org is a
+// QuickBooks realm), else the QuickBooks user's — USD when not recorded. Null
+// when the dashboard isn't showing a QuickBooks company.
+async function quickBooksCurrency(orgId, qboUid) {
+  try {
+    const [[row]] = orgId
+      ? await pool.execute(
+        `SELECT currency FROM qbo_organizations WHERE realm_id = ? ORDER BY currency REGEXP '^[A-Z]{3}$' DESC LIMIT 1`,
+        [String(orgId)])
+      : qboUid
+        ? await pool.execute(
+          `SELECT currency FROM qbo_organizations WHERE user_id = ? ORDER BY currency REGEXP '^[A-Z]{3}$' DESC LIMIT 1`,
+          [qboUid])
+        : [[null]];
+    if (!row) return orgId || !qboUid ? null : 'USD';
+    return /^[A-Z]{3}$/.test(row.currency || '') ? row.currency : 'USD';
+  } catch (_) {
+    return null;
+  }
+}
+
 async function qboProfitAndLoss(qboUid, from, to, basis) {
   return cache.wrap(`dash:qbopl:${qboUid}:${from}:${to}:${basis || 'accrual'}`, 15 * 60 * 1000, async () => {
     const [[tok]] = await pool.execute(
@@ -468,7 +489,10 @@ async function qboProfitAndLoss(qboUid, from, to, basis) {
     const revenue  = (Number(pl.revenue) || 0) + (Number(pl.otherIncome) || 0);
     const expenses = (Number(pl.cogs) || 0) + (Number(pl.opex) || 0) + (Number(pl.otherExpense) || 0);
     // revenue − expenses == QB Net Income by construction.
-    return { ...pl, revenue, expenses, netProfit: Number(pl.netProfit) || 0, currency: rep.currency || 'USD' };
+    // The shared ledger P&L builder labels every report 'INR'; a QuickBooks
+    // company's money is in its own home currency (USD by default), which the
+    // caller resolves from qbo_organizations — so no currency is returned here.
+    return { ...pl, revenue, expenses, netProfit: Number(pl.netProfit) || 0 };
   });
 }
 
@@ -665,12 +689,15 @@ router.get('/', async (req, res) => {
       // only capture a subset of transactions). The invoice COUNT still comes
       // from the synced table. If the live report is unavailable (token/network),
       // fall back to the synced-document sums so the dashboard never goes blank.
+      // QuickBooks dashboards always show the company's own currency (USD by
+      // default) — from the ACTIVE realm's row when one is selected.
       currency = 'USD';
       try {
         const [[o]] = await pool.execute(
           `SELECT currency FROM qbo_organizations
-            WHERE user_id = ? AND currency REGEXP '^[A-Z]{3}$' LIMIT 1`,
-          [qboUid]
+            WHERE user_id = ? AND currency REGEXP '^[A-Z]{3}$'${activeOrgId ? ' AND realm_id = ?' : ''}
+            LIMIT 1`,
+          activeOrgId ? [qboUid, activeOrgId] : [qboUid]
         );
         if (o?.currency) currency = o.currency;
       } catch (_) { /* keep default USD */ }
@@ -680,7 +707,6 @@ router.get('/', async (req, res) => {
         const pl = await qboProfitAndLoss(qboUid, from, to, basis);
         totalRevenue  = pl.revenue;
         totalExpenses = pl.expenses;
-        if (pl.currency) currency = pl.currency;
         plOk = true;
       } catch (err) {
         console.warn('[dashboard] QB P&L fetch failed, falling back to synced docs:', err.message);
@@ -869,6 +895,13 @@ router.get('/', async (req, res) => {
       // Cap at 60 months — anything beyond 5 years isn't actionable
       runwayMonths = parseFloat(Math.min(raw, 60).toFixed(2));
     }
+
+    // QuickBooks companies always display in their own home currency (USD by
+    // default). With an org selected (X-Org-Id) a QuickBooks realm is computed
+    // through the shared-ledger (Zoho) branch above, which defaults to INR —
+    // so resolve the currency from the platform the active org belongs to.
+    const qboCurrency = await quickBooksCurrency(activeOrgId, hasQbo && !hasZohoLive ? qboUid : null);
+    if (qboCurrency) currency = qboCurrency;
 
     return res.json({
       data: {

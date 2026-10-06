@@ -202,7 +202,121 @@ function dayBeforeISO(dateStr) {
   return d.toISOString().slice(0, 10);
 }
 
+// Sorts `accounts` in place and lays them out as the Trial Balance's columns
+// and rows. `compareCols` ([{ key, label, values: Map(ref -> debit-positive
+// balance) }]) adds one column per comparison period after Closing Balance.
+function tbLayout(accounts, compareCols = []) {
+  accounts.sort((a, b) => {
+    const ga = TB_GROUP_ORDER.indexOf(a.group);
+    const gb = TB_GROUP_ORDER.indexOf(b.group);
+    if (ga !== gb) return (ga < 0 ? 99 : ga) - (gb < 0 ? 99 : gb);
+    return byAccountCode(a, b);
+  });
+
+  // Only Xero numbers its chart; Zoho and QuickBooks leave codes blank and
+  // print no code column on their own trial balances, so neither do we.
+  const hasCodes = accounts.some((a) => a.code);
+
+  const columns = [
+    ...(hasCodes
+      ? [{ key: 'label',   label: 'Account Code', align: 'left' },
+         { key: 'account', label: 'Account',      align: 'left' }]
+      : [{ key: 'label',   label: 'Account',      align: 'left' }]),
+    { key: 'type',    label: 'Account Type',          align: 'left'  },
+    { key: 'opening', label: 'Opening Balance',       align: 'right' },
+    { key: 'debit',   label: 'Debit - Year to date',  align: 'right' },
+    { key: 'credit',  label: 'Credit - Year to date', align: 'right' },
+    { key: 'closing', label: 'Closing Balance',       align: 'right' },
+    ...compareCols.map((c) => ({ key: c.key, label: c.label, align: 'right' })),
+  ];
+
+  // Display mapping: put each account's net position (opening + debit − credit)
+  // into a single Debit or Credit cell so Total Debit == Total Credit. Opening
+  // and Closing columns keep their original values; no plOpeningSum adjustment.
+  const rows = [];
+  let totalD = 0;
+  let totalC = 0;
+  const cmpTotals = compareCols.map(() => 0);
+  for (const a of accounts) {
+    const netVal = r2(num(a.opening) + num(a.debit) - num(a.credit));
+    const debit = netVal > 0 ? netVal : (netVal === 0 && !a._compareOnly ? 0 : null);
+    const credit = netVal < 0 ? r2(Math.abs(netVal)) : null;
+    const cells = {
+      account: a.name,
+      type: a.type,
+      opening: a.opening,
+      debit,
+      credit,
+      closing: a.closing,
+    };
+    compareCols.forEach((c, i) => {
+      const v = r2(c.values.get(String(a.ref)) || 0);
+      cells[c.key] = v;
+      cmpTotals[i] += v;
+    });
+    rows.push({
+      label: hasCodes ? a.code : a.name,
+      level: 1,
+      accountRef: a.ref,
+      accountName: a.name,
+      cells,
+    });
+    totalD += debit || 0;
+    totalC += credit || 0;
+  }
+
+  const totalCells = { debit: r2(totalD), credit: r2(totalC), closing: 0 };
+  compareCols.forEach((c, i) => { totalCells[c.key] = r2(cmpTotals[i]); });
+  rows.push({ label: 'Total', isTotal: true, level: 0, cells: totalCells });
+  return { columns, rows };
+}
+
+const MON_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const dayMonYear = (iso) => {
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  return `${d} ${MON_SHORT[m - 1]} ${y}`;
+};
+
+// Trial Balance, with optional "Compare to" columns (previous period / year,
+// as the platforms print them: one balance column per comparison period end,
+// debit positive / credit negative). An account appears when it has a balance
+// in ANY column — e.g. an expense used only last year still lists, with a nil
+// current period, exactly like Xero's comparative Trial Balance.
 async function buildTrialBalance(userId, params = {}) {
+  const compare = String(params.compare || '').toLowerCase();
+  const count = parseInt(params.compare_count, 10) || 0;
+  const single = { ...params, compare: undefined, compare_count: undefined, compare_with: undefined };
+  const base = await buildTrialBalanceCore(userId, single);
+  if (base._noLocalData || !['period', 'year'].includes(compare) || count < 2) return base;
+
+  const { from, to } = base.meta;
+  const periods = buildPeriods(from, to, { compare, compare_count: count, oldest_first: params.oldest_first })
+    .filter((p) => !(p.from === from && p.to === to));
+  if (!periods.length) return base;
+
+  const compareCols = [];
+  const known = new Set(base.accounts.map((a) => String(a.ref)));
+  for (const [i, p] of periods.entries()) {
+    // eslint-disable-next-line no-await-in-loop
+    const r = await buildTrialBalanceCore(userId, {
+      ...single, from_date: p.from, date_start: undefined, to_date: p.to, as_of_date: p.to, date_end: undefined,
+    });
+    const values = new Map();
+    for (const a of r.accounts || []) {
+      values.set(String(a.ref), r2(a.closing));
+      if (!known.has(String(a.ref)) && r2(a.closing) !== 0) {
+        known.add(String(a.ref));
+        base.accounts.push({ ...a, opening: 0, debit: 0, credit: 0, closing: 0, _compareOnly: true });
+      }
+    }
+    compareCols.push({ key: `cmp${i}`, label: dayMonYear(p.to), values });
+  }
+  const { columns, rows } = tbLayout(base.accounts, compareCols);
+  for (const a of base.accounts) delete a._compareOnly;
+  return { ...base, columns, rows, meta: { ...base.meta, compare: periods.map((p) => ({ from: p.from, to: p.to })) } };
+}
+
+async function buildTrialBalanceCore(userId, params = {}) {
   const orgId = await orgWithLedger(userId, params);
   if (!orgId) return NO_LOCAL;
   const platform = resolvePlatform(params);
@@ -390,63 +504,7 @@ async function buildTrialBalance(userId, params = {}) {
     }
   }
 
-  accounts.sort((a, b) => {
-    const ga = TB_GROUP_ORDER.indexOf(a.group);
-    const gb = TB_GROUP_ORDER.indexOf(b.group);
-    if (ga !== gb) return (ga < 0 ? 99 : ga) - (gb < 0 ? 99 : gb);
-    return byAccountCode(a, b);
-  });
-
-  // Only Xero numbers its chart; Zoho and QuickBooks leave codes blank and
-  // print no code column on their own trial balances, so neither do we.
-  const hasCodes = accounts.some((a) => a.code);
-
-  const columns = [
-    ...(hasCodes
-      ? [{ key: 'label',   label: 'Account Code', align: 'left' },
-         { key: 'account', label: 'Account',      align: 'left' }]
-      : [{ key: 'label',   label: 'Account',      align: 'left' }]),
-    { key: 'type',    label: 'Account Type',          align: 'left'  },
-    { key: 'opening', label: 'Opening Balance',       align: 'right' },
-    { key: 'debit',   label: 'Debit - Year to date',  align: 'right' },
-    { key: 'credit',  label: 'Credit - Year to date', align: 'right' },
-    { key: 'closing', label: 'Closing Balance',       align: 'right' },
-  ];
-
-  // Display mapping: put each account's net position (opening + debit − credit)
-  // into a single Debit or Credit cell so Total Debit == Total Credit. Opening
-  // and Closing columns keep their original values; no plOpeningSum adjustment.
-  const rows = [];
-  let totalD = 0;
-  let totalC = 0;
-  for (const a of accounts) {
-    const netVal = r2(num(a.opening) + num(a.debit) - num(a.credit));
-    const debit = netVal >= 0 ? netVal : null;
-    const credit = netVal < 0 ? r2(Math.abs(netVal)) : null;
-    rows.push({
-      label: hasCodes ? a.code : a.name,
-      level: 1,
-      accountRef: a.ref,
-      accountName: a.name,
-      cells: {
-        account: a.name,
-        type: a.type,
-        opening: a.opening,
-        debit,
-        credit,
-        closing: a.closing,
-      },
-    });
-    totalD += debit || 0;
-    totalC += credit || 0;
-  }
-
-  rows.push({
-    label: 'Total',
-    isTotal: true,
-    level: 0,
-    cells: { debit: r2(totalD), credit: r2(totalC), closing: 0 },
-  });
+  const { columns, rows } = tbLayout(accounts);
 
   return {
     columns,

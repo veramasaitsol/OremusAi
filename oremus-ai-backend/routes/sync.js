@@ -549,7 +549,14 @@ makeXeroEntityRoute('/xero/vendors',   xeroSyncVendors,   'Xero vendors');
 makeXeroEntityRoute('/xero/invoices',  xeroSyncInvoices,  'Xero invoices');
 makeXeroEntityRoute('/xero/bills',     xeroSyncBills,     'Xero bills');
 makeXeroEntityRoute('/xero/expenses',  xeroSyncExpenses,  'Xero expenses');
-makeXeroEntityRoute('/xero/journals',  xeroSyncJournals,  'Xero manual journals');
+// Manual journals reach the ledger only through the posting engine, so this
+// sync rebuilds it afterwards.
+makeXeroEntityRoute('/xero/journals', async (userId, accessToken, tenantId) => {
+  const n = await xeroSyncJournals(userId, accessToken, tenantId);
+  const { rebuildXeroLedger } = require('../services/xeroPostingEngine');
+  await rebuildXeroLedger(userId, {});
+  return n;
+}, 'Xero manual journals');
 
 // Rebuild the DB-backed Xero general ledger on demand (source docs → staging →
 // account_transactions) so every Xero report is served from our DB, not Xero's

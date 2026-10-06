@@ -241,12 +241,32 @@ async function bulkInsert(conn, sql, rows, chunkSize = 500) {
 // record. `key` is the response array property (e.g. 'Invoices'). The /Accounts
 // endpoint is NOT paginated (returns all at once) so it keeps its plain GET.
 const XERO_PAGE_SIZE = 100;
+// Xero allows 5 concurrent calls and 60 per minute per org; a burst answers
+// 429 with Retry-After. Wait and retry instead of failing the whole entity —
+// unless the wait is long (the DAILY limit), where failing fast beats hanging
+// the sync for hours.
+const XERO_MAX_RETRY_WAIT_MS = 65000;
+async function xeroGet(url, config, tries = 5) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await axios.get(url, config);
+    } catch (e) {
+      const status = e?.response?.status;
+      if ((status !== 429 && status !== 503) || attempt >= tries) throw e;
+      const ra = Number(e.response.headers?.['retry-after']);
+      const wait = Number.isFinite(ra) ? ra * 1000 : 2000 * 2 ** (attempt - 1);
+      if (wait > XERO_MAX_RETRY_WAIT_MS) throw e;
+      await new Promise((r) => setTimeout(r, wait + 250));
+    }
+  }
+}
+
 async function xeroGetAllPages(url, headers, params, key) {
   const all = [];
   let page = 1;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const res = await axios.get(url, { headers, params: { ...params, page } });
+    const res = await xeroGet(url, { headers, params: { ...params, page } });
     const batch = res.data?.[key] || [];
     all.push(...batch);
     if (batch.length < XERO_PAGE_SIZE) break;
@@ -485,6 +505,7 @@ async function syncVendors(userId, accessToken, tenantId) {
 
 // ── Sync invoices (Type=ACCREC) ──────────────────────────────────────────────
 async function syncInvoices(userId, accessToken, tenantId) {
+  await ensureDocNumberLength();
   const items = await xeroGetAllPages(
     `${XERO_API_BASE}/Invoices`, xeroHeaders(accessToken, tenantId),
     { Statuses: 'AUTHORISED,PAID', where: 'Type=="ACCREC"' }, 'Invoices'
@@ -500,7 +521,7 @@ async function syncInvoices(userId, accessToken, tenantId) {
     const code = inv.CurrencyCode || null;
     return [
       userId, tenantId, `xero:${inv.InvoiceID}`, inv.InvoiceID,
-      inv.InvoiceNumber || null,
+      docNumber(inv.InvoiceNumber),
       inv.Contact?.Name || null,
       toMysqlDate(inv.Date),
       toMysqlDate(inv.DueDate),
@@ -611,8 +632,42 @@ async function syncBillLineItems(conn, userId, tenantId, bills) {
   );
 }
 
+// bills.bill_number / invoices.invoice_number were VARCHAR(100); real Xero
+// numbers run longer (a supplier reference listing several invoice numbers),
+// and one such row aborted the whole bulk insert. Widen once (idempotent,
+// collation kept — see db/doc-number-length.sql); values are also capped at
+// 255 so a longer one can never fail the sync again.
+const DOC_NUMBER_MAX = 255;
+const docNumber = (v) => (v == null || v === '' ? null : String(v).slice(0, DOC_NUMBER_MAX));
+let docNumberLengthChecked = false;
+async function ensureDocNumberLength() {
+  if (docNumberLengthChecked) return;
+  try {
+    const [cols] = await pool.execute(
+      `SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH AS len, COLLATION_NAME AS coll
+         FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND ((TABLE_NAME = 'bills' AND COLUMN_NAME = 'bill_number')
+            OR (TABLE_NAME = 'invoices' AND COLUMN_NAME = 'invoice_number'))`
+    );
+    for (const c of cols) {
+      if (Number(c.len) >= DOC_NUMBER_MAX) continue;
+      const coll = /^[a-z0-9_]+$/i.test(c.coll || '') ? c.coll : 'utf8mb4_general_ci';
+      await pool.execute(
+        `ALTER TABLE ${c.TABLE_NAME} MODIFY ${c.COLUMN_NAME} VARCHAR(${DOC_NUMBER_MAX})
+           CHARACTER SET utf8mb4 COLLATE ${coll} NULL DEFAULT NULL`
+      );
+      console.log(`[Xero] widened ${c.TABLE_NAME}.${c.COLUMN_NAME} to VARCHAR(${DOC_NUMBER_MAX})`);
+    }
+    docNumberLengthChecked = true;
+  } catch (e) {
+    console.warn('[Xero] document-number column check skipped:', e.message);
+  }
+}
+
 // ── Sync bills (Type=ACCPAY) ─────────────────────────────────────────────────
 async function syncBills(userId, accessToken, tenantId) {
+  await ensureDocNumberLength();
   const items = await xeroGetAllPages(
     `${XERO_API_BASE}/Invoices`, xeroHeaders(accessToken, tenantId),
     { Statuses: 'AUTHORISED,PAID', where: 'Type=="ACCPAY"' }, 'Invoices'
@@ -622,7 +677,7 @@ async function syncBills(userId, accessToken, tenantId) {
   const now = new Date();
   const rows = items.map((b) => [
     userId, tenantId, `xero:${b.InvoiceID}`, b.InvoiceID,
-    b.InvoiceNumber || null,
+    docNumber(b.InvoiceNumber),
     b.Contact?.Name || null,
     toMysqlDate(b.Date),
     toMysqlDate(b.DueDate),
@@ -787,49 +842,10 @@ async function syncManualJournals(userId, accessToken, tenantId) {
   // hasn't been applied.
   const storeRaw = await tableExists('xero_raw_transactions');
 
-  // Manual journals always post in the org's own base currency (Xero doesn't
-  // offer a foreign-currency option for them) — same reasoning as the Path B
-  // posting engine's ManualJournal handling in xeroPostingEngine.js.
-  const [[orgRow]] = await pool.execute(
-    'SELECT currency FROM xero_organizations WHERE user_id = ? AND tenant_id = ? LIMIT 1',
-    [userId, String(tenantId)]
-  ).catch(() => [[null]]);
-  const homeCurrency = orgRow?.currency || null;
-
   const now = new Date();
-  const rawRows = [];
-  const lineRows = [];
-  for (const j of journals) {
-    if (storeRaw) {
-      rawRows.push([userId, String(tenantId), 'ManualJournals', `xero:${j.ManualJournalID}`, JSON.stringify(j), now]);
-    }
-    const lines = j.JournalLines || [];
-    for (let i = 0; i < lines.length; i++) {
-      const ln = lines[i];
-      const amount = parseFloat(ln.LineAmount ?? 0);
-      const isDebit = amount >= 0;
-      const accountId = ln.AccountID || ln.AccountCode || `xero:${j.ManualJournalID}:${i}`;
-      lineRows.push([
-        userId, String(tenantId), 'xero', `xero:${j.ManualJournalID}`, String(accountId),
-        toMysqlDt(j.Date),
-        ln.AccountCode || null,
-        ln.Description || j.Narration || null,
-        'ManualJournal',
-        String(i), j.Narration || null,
-        isDebit ? Math.abs(amount) : 0,
-        isDebit ? 0                : Math.abs(amount),
-        Math.abs(amount),
-        isDebit ? 'D' : 'C',
-        'ManualJournal',
-        j.ManualJournalID,
-        i,
-        ln.TaxType || null,
-        parseFloat(ln.TaxAmount ?? 0),
-        homeCurrency,
-        now,
-      ]);
-    }
-  }
+  const rawRows = storeRaw
+    ? journals.map((j) => [userId, String(tenantId), 'ManualJournals', `xero:${j.ManualJournalID}`, JSON.stringify(j), now])
+    : [];
 
   const conn = await pool.getConnection();
   try {
@@ -843,29 +859,17 @@ async function syncManualJournals(userId, accessToken, tenantId) {
         rawRows, 100
       );
     }
-    await bulkInsert(conn,
-      `INSERT INTO account_transactions
-         (user_id, org_id, platform, transaction_id, account_id, transaction_date,
-          account_name, transaction_details, transaction_type,
-          transaction_number, reference_number, debit, credit, balance,
-          balance_type, source_type, source_id, line_number, tax_type,
-          tax_amount, currency_code, synced_at)
-       VALUES ?
-       ON DUPLICATE KEY UPDATE
-         transaction_date=VALUES(transaction_date), account_name=VALUES(account_name),
-         transaction_details=VALUES(transaction_details), transaction_type=VALUES(transaction_type),
-         reference_number=VALUES(reference_number), debit=VALUES(debit), credit=VALUES(credit),
-         balance=VALUES(balance), balance_type=VALUES(balance_type),
-         source_type=VALUES(source_type), source_id=VALUES(source_id), line_number=VALUES(line_number),
-         tax_type=VALUES(tax_type), tax_amount=VALUES(tax_amount),
-         currency_code=COALESCE(VALUES(currency_code), currency_code),
-         synced_at=VALUES(synced_at)`,
-      lineRows
-    );
+    // Ledger lines are NOT written here: the posting engine (xeroPostingEngine
+    // .rebuildXeroLedger) owns every 'xero:' row in account_transactions and
+    // posts each journal with its account name, group, type and base amounts,
+    // honouring Xero's status rules. Writing here too inserted half-formed rows
+    // (account code as the name, no group — dropped by every report) for any
+    // journal the engine skipped, posted DRAFT/VOIDED journals, and overwrote
+    // the engine's rows (same keys). Callers rebuild the ledger after syncing.
   } finally {
     conn.release();
   }
-  console.log(`[Xero Journals] Synced ${journals.length} manual journals (${lineRows.length} lines) for userId=${userId} tenant=${tenantId}`);
+  console.log(`[Xero Journals] Fetched ${journals.length} manual journals for userId=${userId} tenant=${tenantId} (ledger posting: xeroPostingEngine)`);
   return journals.length;
 }
 
@@ -980,23 +984,25 @@ async function syncJournals(userId, accessToken, tenantId) {
 // ── Master sync ─────────────────────────────────────────────────────────────
 async function syncAllXeroData(userId, accessToken, tenantId) {
   console.log(`[Xero Sync] Starting userId=${userId} tenant=${tenantId}`);
-  const results = await Promise.allSettled([
-    syncAccounts(userId, accessToken, tenantId),
-    syncCustomers(userId, accessToken, tenantId),
-    syncVendors(userId, accessToken, tenantId),
-    syncInvoices(userId, accessToken, tenantId),
-    syncBills(userId, accessToken, tenantId),
-    syncExpenses(userId, accessToken, tenantId),
-    syncBankTransactions(userId, accessToken, tenantId),
-    // Manual journals → account_transactions. NOTE: the richer /Journals GL
-    // (syncJournals) is NOT run here because Xero gates that endpoint behind the
-    // premium Advanced tier and grants no accounting.journals.read scope for
-    // granular apps (connections from 29 Apr 2026), so it only ever 401s and
-    // would add log noise. syncJournals stays exported for any future
-    // journal-capable connection — but do NOT run both at once (they'd
-    // double-count manual journals: distinct ManualJournalID vs JournalID keys).
-    syncManualJournals(userId, accessToken, tenantId),
-  ]);
+  // One entity at a time: Xero allows 5 concurrent calls per org, and firing
+  // all eight in parallel tripped 429s that silently dropped whole entities
+  // (customers, expenses, bank transactions). xeroGet also retries a 429.
+  // Manual journals are fetched for the raw archive only; the ledger is posted
+  // by the engine below. The /Journals GL (syncJournals) is NOT run: Xero gates
+  // it behind the Advanced tier and grants no accounting.journals.read scope
+  // for granular apps (connections from 29 Apr 2026), so it only ever 401s.
+  const steps = [
+    syncAccounts, syncCustomers, syncVendors, syncInvoices, syncBills,
+    syncExpenses, syncBankTransactions, syncManualJournals,
+  ];
+  const results = [];
+  for (const step of steps) {
+    try {
+      results.push({ status: 'fulfilled', value: await step(userId, accessToken, tenantId) });
+    } catch (reason) {
+      results.push({ status: 'rejected', reason });
+    }
+  }
   const [acct, cust, vend, inv, bil, exp, bank, jrn] = results.map((r) =>
     r.status === 'fulfilled' ? r.value : `ERR: ${r.reason?.message}`
   );
