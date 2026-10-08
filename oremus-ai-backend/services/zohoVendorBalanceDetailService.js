@@ -83,7 +83,7 @@ async function buildVendorBalanceDetail(userId, params = {}) {
   // the as-of balance the same way AP Aging does, so the two can never
   // disagree), non-payable statuses excluded across all three providers.
   const [bills] = await pool.execute(
-    `SELECT bill_number, vendor_name, date, due_date, total, balance, currency_code
+    `SELECT qbo_id, bill_number, vendor_name, date, due_date, total, balance, currency_code
        FROM bills
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'submitted', 'void', 'voided', 'deleted')`,

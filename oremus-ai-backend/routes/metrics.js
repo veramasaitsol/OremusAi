@@ -14,6 +14,7 @@ const adminClientView = require('../middleware/adminClientView');
 const { resolveProvider } = require('../services/accounting');
 const cache = require('../utils/cache');
 const metrics = require('../services/metricsService');
+const { getFyStartMonth } = require('../services/reportSettingsService');
 
 const router = Router();
 router.use(auth);
@@ -91,6 +92,9 @@ function makeHandler(ep, fn) {
         ctx = await metrics.resolveLocalCtx(req.adminUserId);
       }
       if (!ctx) return res.json(noConnection(ep, params));
+      // The resolved Financial Year (client → admin platform → system default)
+      // for every FY-dependent figure; part of the cache key below.
+      params.fy_start_month = await getFyStartMonth(req.user.id, ctx.provider);
 
       const key = `metrics:${ctx.provider}:${ctx.conn.connectionRef}:${ep}:${hashParams(params)}`;
       const cached = cache.get(key) !== undefined;

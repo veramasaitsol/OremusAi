@@ -279,7 +279,9 @@ export default function Dashboard() {
     lastLoadKey.current = key;
     dispatch(loadDashboard({ clientId: client?.id, from: dateRange.from, to: dateRange.to, basis }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dispatch, client?.id, period, customRange.from, customRange.to, selectedOrgId, basis]);
+  // dateRange.from/to are deps too: a Financial Year change moves the
+  // preset's boundaries without changing `period`.
+  }, [dispatch, client?.id, period, customRange.from, customRange.to, selectedOrgId, basis, dateRange.from, dateRange.to]);
 
   // Manual retry after a failed load (bypasses the dedupe guard above).
   const retryLoad = () => {

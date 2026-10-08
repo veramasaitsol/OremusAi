@@ -660,11 +660,49 @@ const QBO_GL_TYPE_TO_ENTITY = {
   'Refund Receipt':              'RefundReceipt',
 };
 
-async function buildQboCurrencyMap(realmId, accessToken, environment, neededEntities) {
+// Journal-entry lines carry their customer/vendor in JournalEntryLineDetail
+// .Entity, but QBO's GeneralLedger report leaves "Name" blank for many of them
+// (only the memo shows). Collected here — from the same JournalEntry fetch the
+// currency lookup already makes — so each GL row can take its real entity.
+// Key: `${jeId}` → [{ account, amount, side, name }].
+function collectJournalEntities(entries, out) {
+  for (const je of entries) {
+    const lines = [];
+    for (const ln of je.Line || []) {
+      if (ln.DetailType !== 'JournalEntryLineDetail') continue;
+      const det = ln.JournalEntryLineDetail || {};
+      const name = det.Entity?.EntityRef?.name || det.Entity?.Name || null;
+      if (!name) continue;
+      lines.push({
+        account: String(det.AccountRef?.value || ''),
+        amount: Math.round((Number(ln.Amount) || 0) * 100) / 100,
+        side: det.PostingType === 'Credit' ? 'credit' : 'debit',
+        name,
+      });
+    }
+    if (lines.length && je.Id != null) out.set(String(je.Id), lines);
+  }
+}
+
+// The entity of one GL journal row: the journal's line on the same account,
+// side and amount (one match), else the only entity line on that account.
+function journalEntityFor(journalEntities, jeId, accountRef, debit, credit) {
+  const lines = journalEntities.get(String(jeId)) || [];
+  const side = credit > 0 ? 'credit' : 'debit';
+  const amount = credit > 0 ? credit : debit;
+  const onAccount = lines.filter((l) => l.account === String(accountRef));
+  const exact = onAccount.filter((l) => l.side === side && Math.abs(l.amount - amount) < 0.005);
+  if (exact.length) return exact[0].name;
+  const names = [...new Set(onAccount.map((l) => l.name))];
+  return names.length === 1 ? names[0] : null;
+}
+
+async function buildQboCurrencyMap(realmId, accessToken, environment, neededEntities, journalEntities = null) {
   const map = {}; // `${entity}:${id}` -> currency code (e.g. 'USD', 'EUR')
   await Promise.all([...neededEntities].map(async (entity) => {
     try {
       const items = await fetchAllEntities(realmId, accessToken, environment, entity);
+      if (entity === 'JournalEntry' && journalEntities) collectJournalEntities(items, journalEntities);
       for (const item of items) {
         const code = item.CurrencyRef?.value;
         if (code && item.Id != null) map[`${entity}:${item.Id}`] = code;
@@ -716,7 +754,8 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
     const entity = QBO_GL_TYPE_TO_ENTITY[r.cells?.type || r.sourceType];
     if (entity) typesPresent.add(entity);
   }
-  const currencyMap = await buildQboCurrencyMap(realmId, accessToken, environment, typesPresent);
+  const journalEntities = new Map();
+  const currencyMap = await buildQboCurrencyMap(realmId, accessToken, environment, typesPresent, journalEntities);
   const [[orgRow]] = await pool.execute(
     'SELECT currency FROM qbo_organizations WHERE user_id = ? AND realm_id = ? LIMIT 1',
     [userId, String(realmId)]
@@ -752,6 +791,11 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
       const glEntity = QBO_GL_TYPE_TO_ENTITY[glType];
       const currencyCode =
         (glEntity && r.sourceRef != null && currencyMap[`${glEntity}:${r.sourceRef}`]) || homeCurrency || null;
+      // A journal line the report left unnamed takes its real customer/vendor
+      // from the JournalEntry itself, never the memo.
+      const lineName = r.cells?.name
+        || (glEntity === 'JournalEntry' && r.sourceRef != null
+          ? journalEntityFor(journalEntities, r.sourceRef, ref, debit, credit) : null);
       await conn.execute(
         `INSERT INTO account_transactions
            (user_id, org_id, platform, transaction_id, account_id, transaction_date,
@@ -771,7 +815,7 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
           // that reads it as "who this transaction was with" — Sales by
           // Customer chief among them — expects the same here. Fall back to
           // memo only when a row genuinely has no name (e.g. a Journal Entry).
-          r.cells?.name || r.cells?.memo || null,
+          lineName || r.cells?.memo || null,
           glType || 'GeneralLedger',
           String(idx),
           r.cells?.docnum || null,
@@ -975,6 +1019,71 @@ async function syncAccounts(userId, accessToken, realmId, environment) {
 }
 
 // ── Master sync ──────────────────────────────────────────────────────────────
+// ── A/P application links (which bills / credits each Bill Payment settled) ──
+// QuickBooks' A/P Aging shows every open A/P document with its own open
+// amount. The GeneralLedger report carries no applications, so they come from
+// the BillPayment entities: one row per payment line with the document it
+// settled (LinkedTxn: Bill, VendorCredit, JournalEntry, Deposit…), its
+// amount and the payment date. Replaced per company on every sync.
+async function ensureApLinksTable() {
+  await pool.execute(
+    `CREATE TABLE IF NOT EXISTS qbo_ap_links (
+       id            INT AUTO_INCREMENT PRIMARY KEY,
+       user_id       INT          NOT NULL,
+       org_id        VARCHAR(64)  NOT NULL,
+       payment_id    VARCHAR(64)  NOT NULL,
+       payment_date  DATE         NULL,
+       payment_total DECIMAL(18,2) NOT NULL DEFAULT 0,
+       vendor_name   VARCHAR(255) NULL,
+       target_type   VARCHAR(32)  NOT NULL,
+       target_id     VARCHAR(64)  NOT NULL,
+       amount        DECIMAL(18,2) NOT NULL DEFAULT 0,
+       KEY idx_org (org_id),
+       KEY idx_target (org_id, target_type, target_id),
+       KEY idx_payment (org_id, payment_id)
+     )`
+  );
+}
+
+async function syncApLinks(userId, accessToken, realmId, environment) {
+  const payments = await fetchAllEntities(realmId, accessToken, environment, 'BillPayment');
+  await ensureApLinksTable();
+  const rows = [];
+  for (const p of payments) {
+    for (const ln of p.Line || []) {
+      for (const t of ln.LinkedTxn || []) {
+        if (!t.TxnId || !t.TxnType) continue;
+        rows.push([userId, String(realmId), String(p.Id), p.TxnDate || null, Number(p.TotalAmt) || 0,
+          p.VendorRef?.name || null, String(t.TxnType), String(t.TxnId), Number(ln.Amount) || 0]);
+      }
+    }
+    // A payment with no applied lines still exists (fully unapplied).
+    if (!(p.Line || []).some((ln) => (ln.LinkedTxn || []).length)) {
+      rows.push([userId, String(realmId), String(p.Id), p.TxnDate || null, Number(p.TotalAmt) || 0,
+        p.VendorRef?.name || null, 'None', '', 0]);
+    }
+  }
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute('DELETE FROM qbo_ap_links WHERE org_id = ?', [String(realmId)]);
+    for (let i = 0; i < rows.length; i += 500) {
+      const chunk = rows.slice(i, i + 500);
+      await conn.query(
+        `INSERT INTO qbo_ap_links
+           (user_id, org_id, payment_id, payment_date, payment_total, vendor_name, target_type, target_id, amount)
+         VALUES ?`, [chunk]);
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+  return payments.length;
+}
+
 async function syncAllQBOData(userId, accessToken, realmId, environment) {
   console.log(`[QBO Sync] Starting userId=${userId} realmId=${realmId} env=${environment}`);
   const results = await Promise.allSettled([
@@ -1001,7 +1110,14 @@ async function syncAllQBOData(userId, accessToken, realmId, environment) {
     gl = `ERR: ${e.message}`;
     console.error('[QBO Sync] general ledger failed:', e.message);
   }
-  console.log(`[QBO Sync] Done — accounts:${acct} customers:${cust} vendors:${vend} invoices:${inv} salesReceipts:${srec} bills:${bil} expenses:${exp} customerPayments:${cpay} ledger:${gl}`);
+  let links;
+  try {
+    links = await syncApLinks(userId, accessToken, realmId, environment);
+  } catch (e) {
+    links = `ERR: ${e.message}`;
+    console.error('[QBO Sync] A/P application links failed:', e.message);
+  }
+  console.log(`[QBO Sync] Done — accounts:${acct} customers:${cust} vendors:${vend} invoices:${inv} salesReceipts:${srec} bills:${bil} expenses:${exp} customerPayments:${cpay} ledger:${gl} billPayments:${links}`);
 }
 
 // ── Fetch CompanyInfo to get the company name / country / currency ───────────
@@ -1229,4 +1345,8 @@ module.exports = {
   syncCustomerPayments,
   syncJournalEntries,
   syncGeneralLedger,
+  syncApLinks,
+  fetchAllEntities,
+  journalEntityFor,
+  collectJournalEntities,
 };

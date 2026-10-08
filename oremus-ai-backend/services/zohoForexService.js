@@ -130,7 +130,7 @@ async function openByCurrency(table, userId, orgId, base, asOf, excludedStatuses
   const placeholders = excludedStatuses.map(() => '?').join(', ');
   const selectCols = table === 'invoices'
     ? 'invoice_number, date, total, balance, currency_code, exchange_rate'
-    : 'bill_number, vendor_name, date, total, balance, currency_code, exchange_rate';
+    : 'qbo_id, bill_number, vendor_name, date, total, balance, currency_code, exchange_rate';
   const [rows] = await pool.execute(
     `SELECT ${selectCols}
        FROM ${table}

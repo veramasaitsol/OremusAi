@@ -103,7 +103,6 @@ async function buildApAgingDetail(userId, params = {}) {
   // AP aging is point-in-time "as of" a date — the selected "To" date (defaults
   // to today, like every provider's AP aging).
   const asOf = resolveAsOf(params);
-
   // Age by due date (the default for Xero's Aged Payables and QuickBooks' A/P
   // Aging Detail); `aging_by=bill_date` switches to the bill date like Zoho's
   // "Aging By: Bill Date". Only the band distribution changes — the totals are
@@ -118,7 +117,7 @@ async function buildApAgingDetail(userId, params = {}) {
   // statuses excluded across all three providers (Zoho draft/void, Xero
   // DRAFT/SUBMITTED/VOIDED/DELETED).
   const [bills] = await pool.execute(
-    `SELECT bill_number, vendor_name, date, due_date,
+    `SELECT qbo_id, bill_number, vendor_name, date, due_date,
             total, balance, currency_code
        FROM bills
       WHERE user_id = ? AND org_id = ?
@@ -340,7 +339,6 @@ async function buildApAgingSummary(userId, params = {}) {
 
   // Point-in-time as-of date — the selected "To" date (defaults to today).
   const asOf = resolveAsOf(params);
-
   // Age by due date (what Xero's Aged Payables and QuickBooks' A/P Aging
   // Summary do by default); `aging_by=bill_date` switches to the bill date like
   // Zoho's "Aging By: Bill Date" option. Only the bucket distribution changes —
@@ -348,14 +346,13 @@ async function buildApAgingSummary(userId, params = {}) {
   const agingByBillDate =
     ['billdate', 'bill', 'transactiondate', 'invoicedate']
       .includes(String(params.aging_by || params.aging_by_date || '').toLowerCase().replace(/[\s_-]/g, ''));
-
   // Every issued bill (NOT just currently-outstanding ones — a bill that's
   // since been fully paid may still have owed a balance on the as-of date;
   // attachAsOfBillBalances below reconstructs what it actually was). Statuses
   // excluded are the non-payable ones across all three: Zoho draft/void,
   // Xero DRAFT/SUBMITTED/VOIDED/DELETED.
   const [bills] = await pool.execute(
-    `SELECT bill_number, vendor_name, date, due_date, total, balance, currency_code
+    `SELECT qbo_id, bill_number, vendor_name, date, due_date, total, balance, currency_code
        FROM bills
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'submitted', 'void', 'voided', 'deleted')`,
@@ -432,7 +429,7 @@ async function buildApAgingSummary(userId, params = {}) {
     cells.total = round2(AGING_BUCKETS.reduce((s, k) => s + v[k.id], 0));
     const allEntries = AGING_BUCKETS.flatMap((k) => byVendorDrill.get(vendor)?.[k.id] || []);
     if (allEntries.length) cellDrill.total = allEntries;
-    rows.push({ label: vendor, level: 1, cells, cellDrill });
+    rows.push({ label: vendor, level: 1, cells: { vendor, ...cells }, cellDrill });
   }
 
   const totalCells = {};
@@ -491,10 +488,30 @@ async function attachAsOfBillBalances(bills, userId, orgId, asOf) {
 
   // QuickBooks: a bill paid AFTER the as-of date still owed that amount on the
   // date (see qboVendorReconciliation) — add it back so the bill ages correctly.
-  const { billExtra } = await qboVendorReconciliation(userId, orgId, asOf);
+  const { billExtra, billBalance } = await qboVendorReconciliation(userId, orgId, asOf);
+  if (billBalance) {
+    // Exact: each bill's open amount on the as-of date from QuickBooks' own
+    // payment applications.
+    for (const bill of bills) {
+      const bal = bill.qbo_id != null ? billBalance.get(String(bill.qbo_id)) : undefined;
+      if (bal === undefined) continue;
+      bill._balanceAsOf = bal;
+      bill._breakdown = [{ name: bill.vendor_name || null, ref: bill.bill_number || null, date: null,
+        type: 'Bill total less payments applied on or before the as-of date', amount: bal }];
+    }
+    return;
+  }
+  // Each amount is used up as it's applied — capped at what the bill can
+  // still owe, any remainder going to the next bill with the same key — so
+  // two bills sharing number/date/total (duplicates exist in real books)
+  // can never both receive it.
+  const left = new Map(billExtra);
   for (const bill of bills) {
-    const extra = billExtra.get(qboBillKey(bill));
-    if (!extra) continue;
+    const key = qboBillKey(bill);
+    const room = round2(num(bill.total) - num(bill._balanceAsOf));
+    const extra = round2(Math.min(left.get(key) || 0, Math.max(0, room)));
+    if (extra <= 0.005) continue;
+    left.set(key, round2(left.get(key) - extra));
     bill._balanceAsOf = round2(num(bill._balanceAsOf) + extra);
     bill._breakdown = [
       ...(bill._breakdown || []),
@@ -570,11 +587,13 @@ async function attachLedgerBillBalances(bills, userId, orgId, asOf) {
 // QuickBooks' A/P Aging lists, per vendor, every open bill PLUS every document
 // that debited A/P without being applied to a bill: direct Expenses posted to
 // A/P, Vendor Credits, Journal Entries and unapplied Bill Payments — shown as
-// negative lines. Its vendor totals are the vendor balances, which QBO syncs
-// into vendors.outstanding_payable_amount (they foot to the GL A/P balance).
-// The synced GL carries no bill↔payment linkage, so the negative lines are
-// recovered per vendor as (vendor balance − open bill balances) and attributed
-// to that vendor's A/P documents. Only QuickBooks orgs take this path.
+// negative lines. Its vendor totals are the vendor balances AS OF the report
+// date, which are exactly the vendor's A/P ledger lines dated on or before it
+// (so the report always foots to the GL A/P balance on that date). The synced
+// GL carries no bill↔payment linkage, so the negative lines are recovered per
+// vendor as (vendor balance − open bill balances) and attributed to that
+// vendor's own A/P documents. A/P lines with no vendor are listed as they are,
+// never borrowed by another vendor. Only QuickBooks orgs take this path.
 
 const qboOrgCache = new Map();
 async function isQuickBooksOrg(orgId) {
@@ -591,9 +610,7 @@ const qboBillKey = (b) =>
   `${String(b.bill_number || '').trim()}␟${b.date ? fmtDate(new Date(b.date)) : ''}␟${round2(b.total)}`;
 
 const nameKey = (s) => String(s || '').trim().toLowerCase();
-
-// Calendar date as YYYY-MM-DD, whether the driver hands back a string or a Date.
-const ymd = (d) => (d instanceof Date ? fmtDate(d).split('/').reverse().join('-') : String(d || '').slice(0, 10));
+const UNASSIGNED_VENDOR = 'Unassigned (no vendor)';
 
 // The summary, detail and vendor-balance reports all call into this for the
 // same as-of date within one request — compute once.
@@ -607,6 +624,98 @@ function qboVendorReconciliation(userId, orgId, asOf) {
   qboReconCache.set(key, { at: Date.now(), promise });
   promise.catch(() => qboReconCache.delete(key));
   return promise;
+}
+
+// GL source type → the QuickBooks entity a Bill Payment links it by.
+const QBO_LINK_TYPE = {
+  'Bill': 'Bill',
+  'Vendor Credit': 'VendorCredit',
+  'Journal Entry': 'JournalEntry',
+  'Deposit': 'Deposit',
+  'Check': 'Purchase',
+  'Expense': 'Purchase',
+  'Credit Card Credit': 'Purchase',
+};
+
+// Exact open items from QuickBooks' own applications (qbo_ap_links, synced
+// from BillPayment.Line[].LinkedTxn). Every A/P document is open by its
+// amount less what was applied to it on or before the as-of date — the same
+// rule QuickBooks' A/P Aging uses — so no vendor, bucket or amount is inferred.
+// Returns null when the company has no synced links (older sync), so the
+// caller falls back to the ledger reconciliation below.
+async function computeQboExactOpenItems(userId, orgId, asOf, asOfEnd, ctx) {
+  let links;
+  try {
+    [links] = await pool.execute(
+      `SELECT payment_id, DATE_FORMAT(payment_date, '%Y-%m-%d') AS d, payment_total, target_type, target_id, amount
+         FROM qbo_ap_links WHERE org_id = ?`,
+      [orgId]
+    );
+  } catch (_) { return null; } // table not created yet
+  if (!links.length) return null;
+
+  const { canonOf, displayName, bills, billVendorByQboId, expenseVendorByQboId } = ctx;
+  const day = fmtDate(asOfEnd).split('/').reverse().join('-'); // YYYY-MM-DD
+  const applied = new Map();     // `${type}:${id}` → amount applied on/before the as-of date
+  const paymentNet = new Map();  // payment id → { total, applied (bills − credits) }
+  for (const l of links) {
+    if (!l.d || l.d > day) continue;
+    const isBill = l.target_type === 'Bill';
+    if (l.target_type !== 'None') {
+      const k = `${l.target_type}:${l.target_id}`;
+      applied.set(k, (applied.get(k) || 0) + num(l.amount));
+    }
+    const p = paymentNet.get(l.payment_id) || { total: num(l.payment_total), applied: 0 };
+    p.applied += l.target_type === 'None' ? 0 : (isBill ? num(l.amount) : -num(l.amount));
+    paymentNet.set(l.payment_id, p);
+  }
+
+  // Bills: open = total − payments applied on/before the as-of date.
+  const billBalance = new Map();
+  for (const b of bills) {
+    if (!b.qbo_id) continue;
+    billBalance.set(String(b.qbo_id), round2(num(b.total) - (applied.get(`Bill:${b.qbo_id}`) || 0)));
+  }
+
+  const [docs] = await pool.execute(
+    `SELECT source_type, source_id, reference_number, transaction_details,
+            MIN(transaction_date) AS doc_date, SUM(credit) - SUM(debit) AS net
+       FROM account_transactions
+      WHERE user_id = ? AND org_id = ? AND account_type_code = 'accounts_payable'
+        AND transaction_date IS NOT NULL AND transaction_date <= ?
+      GROUP BY source_type, source_id, reference_number, transaction_details`,
+    [userId, orgId, `${day} 23:59:59`]
+  );
+  const items = [];
+  for (const d of docs) {
+    const type = String(d.source_type || '');
+    if (type === 'Bill') continue; // aged from the bills themselves
+    const sid = String(d.source_id || '');
+    const net = num(d.net);
+    let open;
+    if (/^Bill Payment/i.test(type)) {
+      // Unapplied part of the payment (a debit to A/P, so negative).
+      const p = paymentNet.get(sid);
+      open = p ? -round2(p.total - p.applied) : net;
+    } else {
+      const linkType = QBO_LINK_TYPE[type];
+      const used = linkType ? (applied.get(`${linkType}:${sid}`) || 0) : 0;
+      open = net - Math.sign(net) * Math.min(Math.abs(net), used);
+    }
+    open = round2(open);
+    if (Math.abs(open) <= 0.005) continue;
+    const name = (type === 'Expense' && expenseVendorByQboId.get(sid)) || d.transaction_details;
+    const canon = canonOf.get(nameKey(name));
+    const ref = String(d.reference_number || '').trim();
+    items.push({
+      vendor: canon ? displayName.get(canon) : UNASSIGNED_VENDOR,
+      date: d.doc_date, amount: open, total: round2(net), type, docNumber: ref,
+      ref: [type, ref, canon ? null : String(d.transaction_details || '').trim()].filter(Boolean).join(' · '),
+      key: `${type}|${sid}|${String(d.transaction_details || '').trim()}`,
+      canon: canon || null,
+    });
+  }
+  return { billExtra: new Map(), billBalance, items, exact: true };
 }
 
 async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
@@ -654,44 +763,14 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
   );
   const expenseVendorByQboId = new Map(expenses.map((e) => [String(e.qbo_id), e.vendor_name]));
 
-  // A/P documents. The GL's Name column is the vendor for bill payments and
-  // credits; bills and expenses resolve through their own documents; a journal
-  // line with no Name carries its memo, which never resolves to a vendor —
-  // those (mostly credit-card settlements of a bill) are matched to the vendor
-  // whose bill carries exactly that amount (named in the memo, else the latest
-  // such bill dated on or before the journal).
-  const billsByTotal = new Map();
-  for (const b of bills) {
-    const canon = canonOf.get(nameKey(b.vendor_name));
-    if (!canon || !b.date) continue;
-    const k = round2(b.total).toFixed(2);
-    if (!billsByTotal.has(k)) billsByTotal.set(k, []);
-    billsByTotal.get(k).push({ canon, date: ymd(b.date) });
-  }
-  // A vendor is "named in the memo" when its first word (4+ letters) appears in it.
-  const memoWord = new Map();
-  for (const canon of balanceToday.keys()) {
-    const w = nameKey(displayName.get(canon)).split(/[^a-z0-9]+/)[0];
-    if (w && w.length >= 4) memoWord.set(canon, w);
-  }
-  const namedIn = (memo, canon) => {
-    const w = memoWord.get(canon);
-    return !!w && new RegExp(`\\b${w}`).test(nameKey(memo));
-  };
-  const inferVendor = (amount, date, memo) => {
-    const all = billsByTotal.get(round2(Math.abs(amount)).toFixed(2)) || [];
-    const day = ymd(date);
-    const before = all.filter((b) => b.date <= day);
-    const pool2 = before.length ? before : all;
-    if (pool2.length) {
-      const named = pool2.filter((b) => namedIn(memo, b.canon));
-      // Latest bill on/before the journal, else the nearest one after it.
-      return (named.length ? named : pool2)
-        .sort((a, b) => (before.length ? b.date.localeCompare(a.date) : a.date.localeCompare(b.date)))[0].canon;
-    }
-    const named = [...memoWord.keys()].filter((c) => namedIn(memo, c));
-    return named.length === 1 ? named[0] : null;
-  };
+  // QuickBooks' own applications, when synced, give every open item exactly.
+  const exact = await computeQboExactOpenItems(userId, orgId, asOf, asOfEnd,
+    { canonOf, displayName, bills, billVendorByQboId, expenseVendorByQboId });
+  if (exact) return exact;
+
+  // A/P documents. The GL's Name column is the vendor for bill payments,
+  // credits and (as synced) journal lines; bills and expenses resolve through
+  // their own documents.
   const [docs] = await pool.execute(
     `SELECT source_type, source_id, reference_number, transaction_details,
             MIN(transaction_date) AS doc_date, SUM(credit) - SUM(debit) AS net
@@ -701,7 +780,7 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
       GROUP BY source_type, source_id, reference_number, transaction_details`,
     [userId, orgId]
   );
-  const activityAfter = new Map();
+  const balanceAsOf = new Map(); // canon → A/P ledger balance on the as-of date
   const vendorDocs = new Map(); // canon → negative docs on/before the as-of date
   const unattributed = [];
   for (const d of docs) {
@@ -711,18 +790,26 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
       || (type === 'Expense' && expenseVendorByQboId.get(sid))
       || d.transaction_details;
     const net = num(d.net);
-    const canon = canonOf.get(nameKey(name))
-      || (type !== 'Bill' ? inferVendor(net, d.doc_date, d.transaction_details) : null);
+    // The vendor is the line's own name (bills/expenses through their
+    // documents). The QuickBooks sync stores a journal line's real entity, so
+    // nothing is guessed from memos or amounts.
+    const canon = canonOf.get(nameKey(name));
     const onOrBefore = new Date(d.doc_date) <= asOfEnd;
-    if (canon && !onOrBefore) activityAfter.set(canon, (activityAfter.get(canon) || 0) + net);
-    if (!onOrBefore || net >= -0.005 || type === 'Bill') continue;
+    if (!onOrBefore) continue; // after the as-of date: not part of it at all
+    if (canon) balanceAsOf.set(canon, (balanceAsOf.get(canon) || 0) + net);
+    if (type === 'Bill') continue; // bills are aged from the bills themselves
+    if (!canon) {
+      // No vendor on this A/P line — keep it (either sign) under its own name.
+      if (Math.abs(net) > 0.005) unattributed.push({ type, date: d.doc_date, amount: round2(net), ref: String(d.reference_number || '').trim(), name: String(d.transaction_details || '').trim() });
+      continue;
+    }
+    if (net >= -0.005) continue;
     const doc = {
       type, date: d.doc_date, amount: round2(-net), left: round2(-net),
       ref: String(d.reference_number || '').trim(),
       key: `${type}|${sid}|${String(d.transaction_details || '').trim()}`,
     };
-    if (!canon) unattributed.push(doc);
-    else {
+    {
       if (!vendorDocs.has(canon)) vendorDocs.set(canon, []);
       vendorDocs.get(canon).push(doc);
     }
@@ -738,8 +825,8 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
     openBills.get(canon).push(b);
   }
   const gap = new Map();
-  for (const [canon, bal] of balanceToday) {
-    const balAsOf = bal - (activityAfter.get(canon) || 0);
+  for (const canon of new Set([...balanceAsOf.keys(), ...openBills.keys()])) {
+    const balAsOf = balanceAsOf.get(canon) || 0;
     const billed = (openBills.get(canon) || []).reduce((s, b) => s + num(b._balanceAsOf), 0);
     const g = round2(balAsOf - billed);
     if (Math.abs(g) > 0.005) gap.set(canon, g);
@@ -771,7 +858,6 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
     const today = await qboVendorReconciliation(userId, orgId, new Date(9999, 11, 31));
     const byKey = new Map();
     for (const list of vendorDocs.values()) for (const d of list) byKey.set(d.key, d);
-    for (const d of unattributed) byKey.set(d.key, d);
     for (const it of today.items) {
       const doc = it.key && byKey.get(it.key);
       if (!doc || !it.canon) continue; // dated after the as-of date
@@ -808,8 +894,7 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
   // with no vendor name), so an unrelated larger journal is never sliced up.
   for (const [canon] of needing()) {
     const need = -gap.get(canon);
-    const exact = (vendorDocs.get(canon) || []).filter((d) => Math.abs(d.left - need) < 0.005).sort(newestFirst)[0]
-      || unattributed.find((d) => d.left === d.amount && Math.abs(d.amount - need) < 0.005);
+    const exact = (vendorDocs.get(canon) || []).filter((d) => Math.abs(d.left - need) < 0.005).sort(newestFirst)[0];
     if (exact) takeFrom(canon, exact, need);
   }
 
@@ -819,18 +904,6 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
       if (need <= 0.005) break;
       takeFrom(canon, doc, Math.min(doc.left, need));
     }
-  }
-  for (const [canon] of needing()) {
-    const need = -gap.get(canon);
-    const exact = unattributed.find((d) => d.left === d.amount && Math.abs(d.amount - need) < 0.005);
-    if (exact) takeFrom(canon, exact, need);
-  }
-  for (const [canon] of needing()) {
-    const need = -gap.get(canon);
-    const nearest = unattributed
-      .filter((d) => d.left === d.amount && d.amount > need && !/payment/i.test(d.type))
-      .sort((a, b) => a.amount - b.amount)[0];
-    if (nearest) takeFrom(canon, nearest, need);
   }
   for (const [canon] of needing()) {
     for (const doc of (vendorDocs.get(canon) || []).filter((d) => /payment/i.test(d.type)).sort(newestFirst)) {
@@ -845,6 +918,17 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
   for (const [canon, g] of gap) {
     if (Math.abs(g) <= 0.005) continue;
     items.push({ vendor: displayName.get(canon), date: asOf, amount: round2(g), type: 'Unapplied balance', ref: 'Unapplied balance' });
+  }
+  // A/P lines with no vendor (journal lines synced without their entity) are
+  // kept so the total still ties to the ledger A/P, but under ONE row rather
+  // than one row per memo; each still ages by its own date and shows in the
+  // drill-down with its memo.
+  for (const d of unattributed) {
+    items.push({
+      vendor: UNASSIGNED_VENDOR, date: d.date, amount: d.amount, total: d.amount,
+      type: d.type, docNumber: d.ref,
+      ref: [d.type, d.ref, d.name].filter(Boolean).join(' · '),
+    });
   }
   return { billExtra, items };
 }

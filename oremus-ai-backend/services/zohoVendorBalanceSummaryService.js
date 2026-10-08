@@ -87,7 +87,7 @@ async function buildVendorBalanceSummary(userId, params = {}) {
   // end — same bill-level reconstruction as Vendor Balance Detail / AP
   // Aging, summed per vendor instead of listed per document.
   const [bills] = await pool.execute(
-    `SELECT bill_number, vendor_name, date, total, balance, currency_code
+    `SELECT qbo_id, bill_number, vendor_name, date, total, balance, currency_code
        FROM bills
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'submitted', 'void', 'voided', 'deleted')`,

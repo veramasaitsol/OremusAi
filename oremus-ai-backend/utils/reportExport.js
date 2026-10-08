@@ -30,8 +30,10 @@ function toAoA(data) {
   const header = cols.map((c) => c.label ?? c.key);
   const rows = (data?.rows || []).map((r) => {
     const indent = '    '.repeat(Math.max(0, r.level || 0));
-    return cols.map((c) => {
-      if (c.key === 'label') return `${indent}${r.label ?? ''}`;
+    return cols.map((c, ci) => {
+      // The first column is the row's name: reports keep it in `label` even
+      // when the column has another key (vendor, customer…), as the PDF does.
+      if (c.key === 'label' || (ci === 0 && r.cells?.[c.key] == null)) return `${indent}${r.label ?? ''}`;
       const v = r.cells?.[c.key];
       return v == null ? '' : v;
     });

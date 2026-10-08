@@ -91,8 +91,17 @@ const fmt = (d) => {
   return `${y}-${m}-${day}`;
 };
 
-// Indian fiscal year runs Apr 1 – Mar 31.
-const fyStartYear = (d) => (d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1);
+// Fiscal year from the resolved Financial Year setting (client → admin
+// platform FY → system default: QuickBooks/Xero January, Zoho April). Only
+// period BOUNDARIES move; transaction dates are never touched.
+const selectFyStartMonth = (s) => s.settings?.activeFyStartMonth || 4;
+// Calendar year the fiscal year containing `d` began in (fyM = 1..12).
+const fyStartYear = (d, fyM) => (d.getMonth() >= fyM - 1 ? d.getFullYear() : d.getFullYear() - 1);
+// { from, to } of the fiscal year that began in `startYear`.
+const fyRange = (startYear, fyM) => ({
+  from: fmt(new Date(startYear, fyM - 1, 1)),
+  to:   fmt(new Date(startYear + 1, fyM - 1, 0)),
+});
 
 // Sunday-based week start
 const weekStart = (d) => {
@@ -110,7 +119,8 @@ const qEnd    = (y, q) => new Date(y, q * 3 + 3, 0);
 export const selectDateRange = createSelector(
   selectPeriod,
   selectCustomRange,
-  (period, customRange) => {
+  selectFyStartMonth,
+  (period, customRange, fyM) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const y = today.getFullYear();
@@ -159,20 +169,14 @@ export const selectDateRange = createSelector(
         return { from: fmt(qStart(qy, q)), to: fmt(qEnd(qy, q)) };
       }
 
-      case 'this_year': {
-        const fy = fyStartYear(today);
-        return { from: `${fy}-04-01`, to: `${fy + 1}-03-31` };
-      }
+      case 'this_year':
+        return fyRange(fyStartYear(today, fyM), fyM);
 
-      case 'prev_year': {
-        const fy = fyStartYear(today) - 1;
-        return { from: `${fy}-04-01`, to: `${fy + 1}-03-31` };
-      }
+      case 'prev_year':
+        return fyRange(fyStartYear(today, fyM) - 1, fyM);
 
-      default: {
-        const fy = fyStartYear(today);
-        return { from: `${fy}-04-01`, to: fmt(today) };
-      }
+      default:
+        return { from: fyRange(fyStartYear(today, fyM), fyM).from, to: fmt(today) };
     }
   }
 );

@@ -42,8 +42,16 @@ export default function DashboardLayout() {
     dispatch(verifyQBOStatus());
     dispatch(verifyXeroStatus());
     dispatch(loadOrganizations());
-    dispatch(loadReportSettings());
   }, [dispatch]);
+
+  // Financial Year settings resolve for whoever is being viewed (X-Client-Id
+  // makes the server answer for the selected client), so reload them whenever
+  // the admin switches client.
+  const viewAsClientId = useSelector((s) => s.viewAs?.clientId || null);
+  const viewAsProvider = useSelector((s) => s.viewAs?.provider || null);
+  useEffect(() => {
+    dispatch(loadReportSettings());
+  }, [dispatch, viewAsClientId]);
 
   // Push the active platform's Financial-Year start month + Date format into the
   // module-level formatting utils (mirrors the currency subscription in store.js),
@@ -51,10 +59,12 @@ export default function DashboardLayout() {
   const settingsEffective = useSelector((s) => s.settings.effective);
   const orgProvider = useSelector((s) => s.orgs.provider);
   const firstMyPlatform = useSelector((s) => s.settings.myPlatforms[0]);
-  const activeProvider = orgProvider || firstMyPlatform || null;
+  // The selected client's platform wins, then the active org's, then the
+  // caller's own connection.
+  const activeProvider = viewAsProvider || orgProvider || firstMyPlatform || null;
   useEffect(() => {
-    if (activeProvider) applyReportSettings(settingsEffective, activeProvider);
-  }, [settingsEffective, activeProvider]);
+    if (activeProvider) applyReportSettings(settingsEffective, activeProvider, dispatch);
+  }, [settingsEffective, activeProvider, dispatch]);
 
   // Resolve the connected company's display currency ONCE and apply it globally
   // (USD for QuickBooks, org currency for Xero/Zoho) so every module — Ratios,

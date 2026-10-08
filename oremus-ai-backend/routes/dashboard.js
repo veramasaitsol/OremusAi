@@ -7,6 +7,8 @@ const { getEffectiveXeroUserId } = require('../services/xeroService');
 const { getEffectiveZohoUserId } = require('../services/zohoService');
 const { getProvider } = require('../services/accounting');
 const { derivePL, providerBalanceSheetTotals } = require('../services/metricsService');
+// The ONE Financial Year resolver (client → admin platform → system default).
+const { getFyStartMonth } = require('../services/reportSettingsService');
 const { computePLFigures, aggregatePL } = require('../services/zohoLedgerReportsService');
 const { computeKeyRatios } = require('../services/keyRatiosService');
 const { buildArAgingSummary } = require('../services/salesArFromInvoicesService');
@@ -1797,7 +1799,8 @@ router.get('/liquidity', async (req, res) => {
       return res.json({ data: { currentAssets: 0, currentLiabilities: 0, cash: 0, receivables: 0, payables: 0, workingCapital: 0, currentRatio: 0, quickRatio: 0, totalAssets: 0, totalLiabilities: 0, equity: 0, debtEquity: null, interestExpense: 0, interestCoverage: null } });
     }
 
-    const { ratios, raw } = await computeKeyRatios(effUid, orgId, platform, from, to, 4);
+    const { ratios, raw } = await computeKeyRatios(effUid, orgId, platform, from, to,
+      await getFyStartMonth(uid, platform));
 
     // Interest coverage = EBIT / Interest Expense, EBIT = Net Profit + Income
     // Tax + Interest Expense — the same formula used throughout this app's
@@ -1923,7 +1926,8 @@ router.get('/efficiency', async (req, res) => {
     // queries above remain the fallback when that engine has no org to read.
     if (ctxUid && agingOrgId) {
       try {
-        const { raw } = await computeKeyRatios(ctxUid, agingOrgId, ctxPlatform, from, to, 4);
+        const { raw } = await computeKeyRatios(ctxUid, agingOrgId, ctxPlatform, from, to,
+          await getFyStartMonth(uid, ctxPlatform));
         revenue          = Number(raw.revenue) || 0;
         expenses         = revenue + (Number(raw.otherIncome) || 0) - (Number(raw.netProfit) || 0); // every expense line
         totalAssets      = Math.abs(Number(raw.totalAssets) || 0);
@@ -1948,8 +1952,9 @@ router.get('/efficiency', async (req, res) => {
     // these ratios tie out to the provider exactly instead of reading empty.
     if (hasQbo || hasXero) {
       const effUid = hasQbo ? qboUid : xeroUid;
+      const bsPlatform = hasQbo ? 'quickbooks' : 'xero';
       const bs = await providerBalanceSheetTotals(
-        { provider: hasQbo ? 'quickbooks' : 'xero', conn: { effectiveUserId: effUid } }, to
+        { provider: bsPlatform, conn: { effectiveUserId: effUid } }, to, await getFyStartMonth(uid, bsPlatform)
       );
       if (bs) { totalAssets = bs.totalAssets; totalLiabilities = bs.totalLiabilities; }
       try {

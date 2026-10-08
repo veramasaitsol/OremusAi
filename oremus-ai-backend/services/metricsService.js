@@ -598,7 +598,7 @@ async function providerPL(ctx, from, to, params = {}) {
       const ledgerReports = require('./zohoLedgerReportsService');
       const rep = await ledgerReports.buildProfitAndLoss(conn.effectiveUserId,
         { from_date: from, to_date: to, org_id: conn.connectionRef, platform: provider,
-          accounting_basis: params.accounting_basis });
+          accounting_basis: params.accounting_basis, fy_start_month: params.fy_start_month });
       if (rep && !rep._noLocalData) {
         const derived = derivePL(rep.rows, provider);
         // If the GL builder returned all zeros (e.g. Xero with no account_transactions
@@ -625,7 +625,7 @@ async function providerPL(ctx, from, to, params = {}) {
 const RE_TOTAL_ASSETS = /^total (for )?assets$/;
 const RE_TOTAL_LIAB   = /^total (for )?liabilities$/;
 const RE_TOTAL_EQUITY = /^total (for )?equity$/;
-async function providerBalanceSheetTotals(ctx, to) {
+async function providerBalanceSheetTotals(ctx, to, fyStartMonth = null) {
   const { provider, conn } = ctx;
   if (provider !== 'quickbooks' && provider !== 'xero') return null;
   try {
@@ -633,7 +633,8 @@ async function providerBalanceSheetTotals(ctx, to) {
     // (scoped by org_id = realm_id / tenant_id) via the provider-agnostic Zoho GL
     // builder — NO live provider /Reports call.
     const rep = await require('./zohoGlReportsService').buildBalanceSheet(
-      conn.effectiveUserId, { to_date: to, from_date: to, org_id: conn.connectionRef, platform: provider });
+      conn.effectiveUserId, { to_date: to, from_date: to, org_id: conn.connectionRef, platform: provider,
+        ...(fyStartMonth ? { fy_start_month: fyStartMonth } : {}) });
     if (!rep || rep._noLocalData) return null;
     const pick = (re) => {
       for (const r of rep.rows || []) {
@@ -927,7 +928,8 @@ async function getCashflowMetrics(ctx, params, opts = {}) {
   // "indirect estimate" framing.
   let cf = null;
   try {
-    cf = await computeCashFlowMetrics(conn.effectiveUserId, conn.connectionRef, provider, params.from, params.to);
+    cf = await computeCashFlowMetrics(conn.effectiveUserId, conn.connectionRef, provider, params.from, params.to,
+      params.fy_start_month || require('./reportSettingsService').defaultFyStartMonth(provider));
   } catch (_) { cf = null; }
 
   const inflow = flows.inflow, outflow = flows.outflow;

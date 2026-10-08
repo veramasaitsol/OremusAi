@@ -26,12 +26,13 @@ function day(s) {
   return String(s).slice(0, 10);
 }
 
-// Fiscal-year start month (1..12). Defaults to 4 (Indian FY, 1 April) so every
-// existing caller behaves exactly as before; the Settings feature threads a
-// per-platform month in via `params.fy_start_month`.
-function fyMonth(m) {
+// Fiscal-year start month (1..12). The resolved Settings value arrives as
+// `params.fy_start_month`; without one, the platform's system default
+// (QuickBooks / Xero: January, Zoho: April; April when the platform is unknown).
+function fyMonth(m, platform = null) {
   const n = Number(m);
-  return Number.isInteger(n) && n >= 1 && n <= 12 ? n : 4;
+  if (Number.isInteger(n) && n >= 1 && n <= 12) return n;
+  return require('./reportSettingsService').defaultFyStartMonth(platform);
 }
 
 // Start of the fiscal year that contains `date` (Date | ISO), for the given
@@ -90,7 +91,7 @@ function resolveRange(params = {}) {
   if (to && !isValidDay(to)) to = null;
   if (from && to) return { from: day(from), to: day(to) };
   const anchor = from || to || new Date();
-  const fyM = fyMonth(params.fy_start_month);
+  const fyM = fyMonth(params.fy_start_month, params.platform);
   return {
     from: from ? day(from) : fiscalYearStart(anchor, fyM),
     to:   to   ? day(to)   : fiscalYearEnd(anchor, fyM),
@@ -209,7 +210,7 @@ async function resolveReportContext(userId, params = {}, pool = defaultPool) {
     effectiveUserId: userId,
     orgId,
     platform: resolvePlatform(params),
-    fyStartMonth: fyMonth(params.fy_start_month),
+    fyStartMonth: fyMonth(params.fy_start_month, params.platform),
     range: resolveRange(params),
     asOf: resolveAsOf(params),
     basis: resolveBasis(params),

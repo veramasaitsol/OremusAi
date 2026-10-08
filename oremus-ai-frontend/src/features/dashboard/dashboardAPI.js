@@ -1,6 +1,7 @@
 import axiosClient from '../../services/axiosClient.js';
 import { fmt } from '../../utils/fmt.js';
 import { previousPeriod, growthPct } from '../../utils/periodCompare.js';
+import { getFiscalYearStartMonth } from '../reports/data/dateRanges.js';
 
 const PALETTE = ['#2563EB', '#06B6D4', '#8B5CF6', '#10B981', '#F59E0B', '#64748B'];
 
@@ -41,7 +42,9 @@ export async function fetchDashboard({ clientId, from, to, basis } = {}) {
     // preceding equivalent period (utils/periodCompare.js), raw values only.
     // Each call soft-fails to null so a missing prior period hides the growth
     // instead of faking 0%.
-    const prev = (from && to) ? previousPeriod(from, to) : null;
+    // A year-to-date range compares with the same dates last year, measured
+    // from the resolved Financial Year start (not a fixed April).
+    const prev = (from && to) ? previousPeriod(from, to, { fyStartMonth: getFiscalYearStartMonth() }) : null;
     const prevParams = prev ? { ...params, from: prev.from, to: prev.to } : null;
     const prevGet = (url) => (prevParams
       ? axiosClient.get(url, { params: prevParams }).then((r) => r.data?.data ?? null).catch(() => null)

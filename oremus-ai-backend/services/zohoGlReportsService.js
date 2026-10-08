@@ -104,11 +104,12 @@ function resolveAsOf(params) {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Fiscal-year start month (1..12) for this request. Comes from the per-platform
-// Settings feature via `params.fy_start_month`; defaults to 4 (1 April).
+// Fiscal-year start month (1..12) for this request: the resolved Settings value
+// (`params.fy_start_month`), else the platform's system default.
 function fyMonthOf(params) {
   const n = Number(params && params.fy_start_month);
-  return Number.isInteger(n) && n >= 1 && n <= 12 ? n : 4;
+  if (Number.isInteger(n) && n >= 1 && n <= 12) return n;
+  return require('./reportSettingsService').defaultFyStartMonth(params && params.platform);
 }
 
 // Period window for the General Ledger (default: the fiscal year containing today

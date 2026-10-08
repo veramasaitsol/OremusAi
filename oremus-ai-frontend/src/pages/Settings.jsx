@@ -55,12 +55,17 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
 const PLATFORM_LABEL = { zoho: 'Zoho', quickbooks: 'QuickBooks', xero: 'Xero' };
 
-function FyPlatformRow({ platform, scope, row, effective, onSave, saving }) {
-  const eff = effective || { fyStartMonth: 4 };
-  const initial = () => (row?.fyStartMonth != null ? String(row.fyStartMonth) : (scope === 'own' ? '' : String(eff.fyStartMonth)));
+const SOURCE_LABEL = { client: 'client override', admin: 'admin default', system: 'system default' };
+
+// One platform's FY start month. '' = no setting at this level → inherit:
+// a client inherits the admin's platform FY (else the system default); the
+// admin's own setting falls back to the system default.
+function FyPlatformRow({ platform, scope, row, effective, inheritedMonth, onSave, saving }) {
+  const eff = effective || { fyStartMonth: inheritedMonth || 4 };
+  const initial = () => (row?.fyStartMonth != null ? String(row.fyStartMonth) : '');
   const [month, setMonth] = useState(initial);
 
-  useEffect(() => { setMonth(initial()); }, [row?.fyStartMonth, scope, eff.fyStartMonth]);
+  useEffect(() => { setMonth(initial()); }, [row?.fyStartMonth, scope]);
 
   const dirty = String(month) !== initial();
 
@@ -77,12 +82,17 @@ function FyPlatformRow({ platform, scope, row, effective, onSave, saving }) {
           onChange={(e) => setMonth(e.target.value)}
           className="h-9 px-2 rounded-md border border-navy-200 dark:border-navy-700 bg-white dark:bg-navy-950 text-[13px] text-navy-800 dark:text-navy-100"
         >
-          {scope === 'own' && (
-            <option value="">Workspace default ({MONTH_NAMES[eff.fyStartMonth - 1]})</option>
-          )}
+          <option value="">
+            {scope === 'own' ? 'Admin default' : 'System default'} ({MONTH_NAMES[(inheritedMonth || 4) - 1]})
+          </option>
           {MONTH_NAMES.map((n, i) => <option key={n} value={i + 1}>{n}</option>)}
         </select>
       </label>
+
+      <span className="text-[11.5px] text-navy-400 w-full sm:w-auto">
+        Applied: {MONTH_NAMES[eff.fyStartMonth - 1]} – {MONTH_NAMES[(eff.fyStartMonth + 10) % 12]}
+        {eff.source ? ` (${SOURCE_LABEL[eff.source] || eff.source})` : ''}
+      </span>
 
       <button
         type="button"
@@ -113,8 +123,8 @@ function FinancialYearSection() {
       icon={CalendarDays}
       title="Financial Year"
       subtitle={s.canEditAdmin
-        ? 'Start month per platform — every client inherits these defaults'
-        : 'Override the workspace default for your account only'}
+        ? 'Start month per platform. Clients inherit it unless they set their own. Changes reporting periods only, never transaction dates.'
+        : 'Override the admin default for your account only. Changes reporting periods only, never transaction dates.'}
     >
       {s.status === 'loading' && rows.length === 0 ? (
         <div className="px-6 py-5 text-[13px] text-navy-500 flex items-center gap-2">
@@ -132,6 +142,9 @@ function FinancialYearSection() {
             scope={scope}
             row={row}
             effective={s.effective?.[platform]}
+            inheritedMonth={scope === 'own'
+              ? s.inherited?.[platform]?.fyStartMonth
+              : s.systemDefaults?.[platform]}
             onSave={onSave}
             saving={s.saving}
           />

@@ -11,19 +11,24 @@
  *                      scope 'own'   — the caller's override for their own
  *                                      connection (null fyStartMonth = inherit).
  *
- * Resolution when a report runs: client's own row → admin default row → April.
+ * Resolution when a report runs: client's own row → admin default row →
+ * platform system default (QuickBooks / Xero: January, Zoho: April).
  */
 
 const { Router } = require('express');
 const pool = require('../config/db');
 const auth = require('../middleware/auth');
 const {
-  PLATFORMS, DEFAULTS,
+  PLATFORMS, DEFAULTS, PLATFORM_DEFAULT_FY,
   getReportSettings, setFyStartMonth, rowsForScope,
 } = require('../services/reportSettingsService');
 
 const router = Router();
 router.use(auth);
+// Admin "view as client" (X-Client-Id): resolve the FY for the client being
+// viewed, so its override applies on the admin's screen too. The admin keeps
+// its role, so the admin defaults stay editable.
+router.use(require('../middleware/adminClientView'));
 
 // Which platform(s) the user has connected, in the app's provider precedence.
 async function connectedPlatforms(userId) {
@@ -36,6 +41,16 @@ async function connectedPlatforms(userId) {
   for (const [name, sql] of probes) {
     try { const [[r]] = await pool.execute(sql, [userId]); if (r) out.push(name); }
     catch { /* table absent on this deployment */ }
+  }
+  // A client who reports through the admin's connection has no token row of
+  // its own; its platform is its integration_type (the same signal the
+  // reports route uses), so it can still set its own FY.
+  if (!out.length) {
+    try {
+      const [[u]] = await pool.execute('SELECT integration_type FROM users WHERE id = ?', [userId]);
+      const t = String(u?.integration_type || '').toLowerCase();
+      if (PLATFORMS.includes(t)) out.push(t);
+    } catch { /* column absent */ }
   }
   return out;
 }
@@ -56,6 +71,16 @@ router.get('/report', async (req, res) => {
     const effective = {};
     for (const p of PLATFORMS) effective[p] = await getReportSettings(req.user.id, p);
     body.effective = effective;
+
+    // What each level falls back to: the system default per platform, and what a
+    // client inherits when it has no override (admin platform FY, else system).
+    body.systemDefaults = PLATFORM_DEFAULT_FY;
+    const adminScope = await rowsForScope(0);
+    body.inherited = {};
+    for (const p of PLATFORMS) {
+      const m = Number(adminScope[p]?.fy_start_month);
+      body.inherited[p] = { fyStartMonth: m >= 1 && m <= 12 ? m : PLATFORM_DEFAULT_FY[p] };
+    }
 
     if (isAdmin) {
       const adminRows = await rowsForScope(0);
