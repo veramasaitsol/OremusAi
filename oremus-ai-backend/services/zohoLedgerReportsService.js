@@ -772,10 +772,10 @@ async function computeCashFlowFigures(userId, orgId, platform, from, to) {
 // never drift from the P&L Report), classified by name using the identical
 // regexes metricsService.js already applies to report ROWS — kept in sync
 // here rather than re-derived, so both call sites agree on what counts.
-// Matches only where the account normally lives on every platform's P&L:
-// Depreciation in Operating Expense, Interest/Tax in Non-Operating Expense —
-// this avoids e.g. "Professional Tax" (a routine opex line) being picked up
-// as Income Tax.
+// Depreciation / Amortization can land in Operating Expense OR Other Expense
+// depending on the platform chart (QuickBooks often posts both under
+// other_expense). Interest/Tax stay Non-Operating only — that avoids e.g.
+// "Professional Tax" (a routine opex line) being picked up as Income Tax.
 const RE_DEPRECIATION = /deprecia|amorti/i;
 const RE_INTEREST     = /interest/i;
 const RE_TAX          = /(^|\b)(income )?tax/i;
@@ -797,7 +797,10 @@ function sumMatchingAccounts(bucket, re) {
 async function extractPLLineItems(userId, orgId, from, to) {
   const buckets = await aggregatePL(userId, orgId, null, from, to);
   return {
-    depreciation:    num(sumMatchingAccounts(buckets.operating_expense, RE_DEPRECIATION)) || 0,
+    depreciation: num(
+      sumMatchingAccounts(buckets.operating_expense, RE_DEPRECIATION)
+      + sumMatchingAccounts(buckets.other_expense, RE_DEPRECIATION)
+    ) || 0,
     interestExpense: num(sumMatchingAccounts(buckets.other_expense, RE_INTEREST)) || 0,
     incomeTax:       num(sumMatchingAccounts(buckets.other_expense, RE_TAX)) || 0,
   };

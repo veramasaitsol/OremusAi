@@ -368,9 +368,13 @@ async function resolveCashOnHand(av, uid, activeOrgId, asOf) {
       .filter((a) => a.balance !== 0));
   }
 
-  // 2. Generic posted ledger (legacy/local orgs without a live Zoho token).
+  // 2. Generic posted ledger (includes QuickBooks GL). Honours `asOf` so Cash on
+  //    Hand moves with the dashboard date filter — must stay BEFORE the QB/Xero
+  //    chart-of-accounts snapshot branches, which have no history to replay.
   if (av.hasAcctTxn) {
-    const ledgerAccounts = await fromAccountLedger(uid);
+    // QB/Xero ledger rows are keyed by the effective platform user id.
+    const ledgerUid = av.hasQbo ? av.qboUid : (av.hasXero ? av.xeroUid : uid);
+    const ledgerAccounts = await fromAccountLedger(ledgerUid);
     if (ledgerAccounts.length > 0) return pack(ledgerAccounts);
   }
 
@@ -380,6 +384,8 @@ async function resolveCashOnHand(av, uid, activeOrgId, asOf) {
   // 4. QuickBooks — Bank balances from the synced chart of accounts. Reduced-
   //    schema deployments store the COA as AccountBalance snapshot rows in
   //    account_transactions; full-schema deployments have the qbo_accounts table.
+  //    No as-of support (current snapshot only) — used only when the dated GL
+  //    path above returned nothing.
   if (av.hasQbo) {
     let rows = await safeQuery(
       `SELECT account_id AS id, account_name AS name, balance AS bal
@@ -536,6 +542,11 @@ router.get('/', async (req, res) => {
 
     let totalRevenue = 0, totalExpenses = 0, totalPayments = 0;
     let totalInvoices = 0, totalCustomers = 0, outstandingReceivables = 0;
+    // Operating expense from the same P&L the Profit & Loss report uses —
+    // burn/runway must use opex (not total expenses). Declared here so every
+    // platform branch can set it; previously it only lived inside the Zoho
+    // branch and stayed undefined for QuickBooks / Xero clients.
+    let opexForBurn = 0;
     // Display currency for the whole dashboard. Defaults to INR (Zoho/legacy
     // Indian data); overridden per branch so QB/Xero render their own currency.
     let currency = 'INR';
@@ -553,7 +564,6 @@ router.get('/', async (req, res) => {
         );
         if (zo?.currency) currency = zo.currency;
       } catch (_) { /* keep default INR */ }
-      var opexForBurn = 0
       try {
         // Revenue / Expenses from the local general ledger (account_transactions).
         // Use the CANONICAL P&L calculation (computePLFigures) so dashboard KPIs
@@ -570,7 +580,7 @@ router.get('/', async (req, res) => {
         if (revenue === 0 && expenses === 0) {
           throw new Error('No local ledger activity — falling back to warehouse');
         }
-        opexForBurn = plFigures.opex
+        opexForBurn = Number(plFigures.opex) || 0;
         totalRevenue  = revenue;
         totalExpenses = expenses;
 
@@ -642,11 +652,35 @@ router.get('/', async (req, res) => {
       // calculation (computePLFigures) so dashboard KPIs match the P&L Report.
       // Old approach summed only gross credits/debits; this uses net (credit−debit
       // for income, debit−credit for expense) matching the accounting standard.
+      // QuickBooks/Xero GL rows live under the effective platform user + realm /
+      // tenant — not always req.user.id — so resolve those before aggregating.
       try {
-        const acctOrgId = activeOrgId || null;
-        const plFigures = await computePLFigures(uid, acctOrgId, null, from, to);
+        let acctUid = uid;
+        let acctOrgId = activeOrgId || null;
+        if (hasQbo) {
+          acctUid = qboUid;
+          if (!acctOrgId) {
+            const [[t]] = await pool.execute(
+              'SELECT realm_id FROM qbo_tokens WHERE user_id=? AND realm_id IS NOT NULL LIMIT 1',
+              [qboUid]
+            ).catch(() => [[null]]);
+            acctOrgId = t?.realm_id || null;
+          }
+        } else if (hasXero) {
+          acctUid = xeroUid;
+          if (!acctOrgId) {
+            const [[t]] = await pool.execute(
+              'SELECT tenant_id FROM xero_tokens WHERE user_id=? AND tenant_id IS NOT NULL LIMIT 1',
+              [xeroUid]
+            ).catch(() => [[null]]);
+            acctOrgId = t?.tenant_id || null;
+          }
+        }
+        const plFigures = await computePLFigures(acctUid, acctOrgId, null, from, to);
         totalRevenue = plFigures.revenue + plFigures.otherIncome;
         totalExpenses = plFigures.cogs + plFigures.opex + plFigures.otherExpense;
+        // Same operating expense the P&L report shows — used for burn/runway.
+        opexForBurn = Number(plFigures.opex) || 0;
       } catch (_) {
         // Fallback: if computePLFigures fails (no org_id), use legacy gross sums
         const [revRow] = await safeQuery(
@@ -709,6 +743,8 @@ router.get('/', async (req, res) => {
         const pl = await qboProfitAndLoss(qboUid, from, to, basis);
         totalRevenue  = pl.revenue;
         totalExpenses = pl.expenses;
+        // P&L operating expense (not cogs/other) — same figure as the P&L report.
+        opexForBurn = Number(pl.opex) || 0;
         plOk = true;
       } catch (err) {
         console.warn('[dashboard] QB P&L fetch failed, falling back to synced docs:', err.message);
@@ -742,6 +778,7 @@ router.get('/', async (req, res) => {
         const pl = await xeroProfitAndLoss(xeroUid, from, to, basis);
         totalRevenue  = pl.revenue;
         totalExpenses = pl.expenses;
+        opexForBurn = Number(pl.opex) || 0;
         if (pl.currency) currency = pl.currency;
       } catch (err) {
         console.warn('[dashboard] Xero P&L from GL failed, falling back to docs:', err.message);
@@ -885,12 +922,27 @@ router.get('/', async (req, res) => {
     const cashOnHand = cash.total;
     const bankCount  = cash.bankCount;
 
-    // ── Burn rate: average monthly expenses over the SELECTED period (same
-    // totalExpenses already resolved per-provider above, and the same period-
-    // average approach GET /kpi/burn uses), so the tile moves with the filter
-    // instead of always showing a trailing-N-months-from-today figure.
+    // ── Burn rate: average monthly operating expense over the SELECTED period.
+    // Always take opex from the same P&L path the Profit & Loss report uses.
+    // QB/Xero clients often land in the hasAcctTxn branch (synced GL) before
+    // the dedicated hasQbo/hasXero branches, so re-resolve here to guarantee
+    // burn matches the report's Operating Expense — never leave it undefined/0
+    // when the P&L has a real figure.
+    if (!hasZohoLive || !zohoLocalOk) {
+      try {
+        if (hasQbo) {
+          const pl = await qboProfitAndLoss(qboUid, from, to, basis);
+          opexForBurn = Number(pl.opex) || 0;
+        } else if (hasXero) {
+          const pl = await xeroProfitAndLoss(xeroUid, from, to, basis);
+          opexForBurn = Number(pl.opex) || 0;
+        }
+      } catch (err) {
+        console.warn('[dashboard] burn opex from P&L failed:', err.message);
+      }
+    }
     const monthCount = Math.max(1, monthKeysBetween(from, to).length);
-    const monthlyBurn = opexForBurn / monthCount 
+    const monthlyBurn = (Number(opexForBurn) || 0) / monthCount;
     let runwayMonths = null;
     if (monthlyBurn > 0 && cashOnHand > 0) {
       const raw = cashOnHand / monthlyBurn;
@@ -1899,9 +1951,12 @@ router.get('/efficiency', async (req, res) => {
     let annualExp  = (parseFloat(allTimeExp?.v || 0) / allExpSpan) * 365;
     let receivablesAsOf = receivables;
     let payablesAsOf    = payables;
-    let openingReceivables = null; // AR the day before `from`, for average AR
-    let openingPayables = null;    // AP the day before `from`, for average AP
-    let operatingExpenses = null;  // P&L operating expenses for the period
+    let openingReceivables = null; // AR the day before `from` (informational)
+    let openingPayables = null;    // AP the day before `from` (informational)
+    let operatingExpenses = null;  // P&L Operating Expense for the period
+    let otherExpenses = null;      // P&L Non-Operating / Other Expense for the period
+    let netProfit = null;          // P&L Net Profit for the period (ROE numerator)
+    let totalEquity = null;        // Balance Sheet Total Equity as of `to` (ROE denominator)
 
     // ── Liabilities → equity (for ROE / Debt-driven ratios) ───────────────────
     // Equity = total assets − total liabilities (latest per-account balances),
@@ -1918,51 +1973,61 @@ router.get('/efficiency', async (req, res) => {
     );
     let totalLiabilities = liabRows.reduce((s, r) => s + Math.abs(parseFloat(r.balance || 0)), 0);
 
-    // Period-correct inputs. The queries above read TODAY's open AR/AP, the
-    // latest-ever account balances and all-time revenue/expenses, so AR Days,
-    // AP Days, Asset Turnover, ROE and the totals never moved with the
-    // selected dates. Use the same engine as the Liquidity section / Ratios
-    // page instead: P&L for [from, to] and Balance Sheet as of `to`. The
-    // queries above remain the fallback when that engine has no org to read.
+    // Period-correct inputs from the same engines as the P&L + Balance Sheet
+    // reports: P&L for [from, to] and Balance Sheet as of `to`. The warehouse /
+    // ledger queries above remain the fallback when that engine has no org.
+    let figuresFromReports = false;
     if (ctxUid && agingOrgId) {
       try {
         const { raw } = await computeKeyRatios(ctxUid, agingOrgId, ctxPlatform, from, to,
           await getFyStartMonth(uid, ctxPlatform));
-        revenue          = Number(raw.revenue) || 0;
-        expenses         = revenue + (Number(raw.otherIncome) || 0) - (Number(raw.netProfit) || 0); // every expense line
-        totalAssets      = Math.abs(Number(raw.totalAssets) || 0);
-        totalLiabilities = Math.abs(Number(raw.totalLiabilities) || 0);
-        receivablesAsOf  = Number(raw.accountsReceivable) || 0;
-        payablesAsOf     = Math.abs(Number(raw.accountsPayable) || 0);
-        openingReceivables = raw.openingAccountsReceivable == null ? null : Number(raw.openingAccountsReceivable) || 0;
-        openingPayables = raw.openingAccountsPayable == null ? null : Math.abs(Number(raw.openingAccountsPayable) || 0);
+        revenue           = Number(raw.revenue) || 0;
         operatingExpenses = Number(raw.opex) || 0;
+        otherExpenses     = Number(raw.otherExpense) || 0;
+        // Total expenses for AP Days = Operating + Non-Operating (excludes COGS).
+        expenses          = operatingExpenses + otherExpenses;
+        netProfit         = Number(raw.netProfit) || 0;
+        totalAssets       = Math.abs(Number(raw.totalAssets) || 0);
+        totalLiabilities  = Math.abs(Number(raw.totalLiabilities) || 0);
+        totalEquity       = Number(raw.totalEquity) || 0;
+        // Balance Sheet closing AR / AP as of `to`.
+        receivablesAsOf   = Math.abs(Number(raw.accountsReceivable) || 0);
+        payablesAsOf      = Math.abs(Number(raw.accountsPayable) || 0);
+        openingReceivables = raw.openingAccountsReceivable == null ? null : Number(raw.openingAccountsReceivable) || 0;
+        openingPayables    = raw.openingAccountsPayable == null ? null : Math.abs(Number(raw.openingAccountsPayable) || 0);
         annualRev = (revenue  / periodDays) * 365;
         annualExp = (expenses / periodDays) * 365;
+        figuresFromReports = revenue > 0 || expenses > 0 || receivablesAsOf > 0 || payablesAsOf > 0;
       } catch (err) {
         console.warn('[efficiency] period figures unavailable, using fallback:', err.message);
       }
     }
 
-    // QuickBooks/Xero write no dated general ledger here, so everything above
-    // (totalAssets, totalLiabilities, revenue, expenses, annualRev/Exp) reads
-    // as 0 for them — ROE, Cost to Income, Asset Turnover, AR/AP Days would
-    // silently show null/0. Override with each provider's OWN live Balance
-    // Sheet (totals) + P&L (revenue/expenses) report for the same period, so
-    // these ratios tie out to the provider exactly instead of reading empty.
-    if (hasQbo || hasXero) {
+    // QuickBooks / Xero fallback when the shared key-ratios path had no org /
+    // no figures: use each provider's P&L (+ BS totals) so ratios still populate.
+    if ((hasQbo || hasXero) && !figuresFromReports) {
       const effUid = hasQbo ? qboUid : xeroUid;
       const bsPlatform = hasQbo ? 'quickbooks' : 'xero';
       const bs = await providerBalanceSheetTotals(
         { provider: bsPlatform, conn: { effectiveUserId: effUid } }, to, await getFyStartMonth(uid, bsPlatform)
       );
-      if (bs) { totalAssets = bs.totalAssets; totalLiabilities = bs.totalLiabilities; }
+      if (bs) {
+        totalAssets = bs.totalAssets;
+        totalLiabilities = bs.totalLiabilities;
+        if (bs.equity != null) totalEquity = Number(bs.equity) || 0;
+      }
       try {
         const pl = hasQbo
           ? await qboProfitAndLoss(effUid, from, to, 'accrual')
           : await xeroProfitAndLoss(effUid, from, to, 'accrual');
-        revenue  = pl.revenue;
-        expenses = pl.expenses;
+        // qbo/xeroProfitAndLoss overwrite `.revenue` with operating + otherIncome.
+        // Peel operating revenue back out for AR Days.
+        const otherIncome = Number(pl.otherIncome) || 0;
+        revenue = Math.max(0, (Number(pl.revenue) || 0) - otherIncome);
+        operatingExpenses = Number(pl.opex) || 0;
+        otherExpenses = Number(pl.otherExpense) || 0;
+        expenses = operatingExpenses + otherExpenses;
+        netProfit = Number(pl.netProfit) || 0;
         annualRev = (revenue  / periodDays) * 365;
         annualExp = (expenses / periodDays) * 365;
       } catch (err) {
@@ -1970,30 +2035,39 @@ router.get('/efficiency', async (req, res) => {
       }
     }
 
-    // AR Days (standard) = Average AR ÷ Revenue × days in the period, where
-    // Average AR = (opening AR + closing AR) ÷ 2 — i.e. 365 ÷ Receivables
-    // Turnover over a full year. Opening AR is the balance the day before
-    // `from`; without an opening snapshot it falls back to closing AR.
+    // AR Days = (Accounts Receivable ÷ Revenue) × days in period
+    // AP Days = (Accounts Payable ÷ Total Expenses) × days in period
+    //   Total Expenses = Operating Expense + Non-Operating Expense (P&L)
+    // AR / AP come from the Balance Sheet as of `to`; Revenue / Expenses from
+    // the P&L for [from, to]. periodDays is 365 for a full fiscal year.
+    const apExpenseBase = (operatingExpenses != null || otherExpenses != null)
+      ? (Number(operatingExpenses) || 0) + (Number(otherExpenses) || 0)
+      : expenses;
+    const arDays = revenue > 0
+      ? Math.round((receivablesAsOf / revenue) * periodDays)
+      : 0;
+    const apDays = apExpenseBase > 0
+      ? Math.round((payablesAsOf / apExpenseBase) * periodDays)
+      : 0;
     const averageReceivables = openingReceivables != null
       ? (openingReceivables + receivablesAsOf) / 2
       : receivablesAsOf;
-    const arDays = revenue > 0 ? Math.round((averageReceivables / revenue) * periodDays) : 0;
-    // AP Days (standard) = Average AP ÷ Operating Expenses × days in the
-    // period, where Average AP = (opening AP + closing AP) ÷ 2. Opening AP is
-    // the balance the day before `from`; without an opening snapshot it falls
-    // back to closing AP. Without P&L operating expenses (engine unavailable)
-    // the period's total expenses are used.
     const averagePayables = openingPayables != null
       ? (openingPayables + payablesAsOf) / 2
       : payablesAsOf;
-    const apExpenseBase = operatingExpenses != null ? operatingExpenses : expenses;
-    const apDays = apExpenseBase > 0 ? Math.round((averagePayables / apExpenseBase) * periodDays) : 0;
     const assetTurnover = totalAssets > 0 && annualRev > 0
       ? parseFloat((annualRev / totalAssets).toFixed(2)) : 0;
 
-    const equity           = totalAssets - totalLiabilities;
-    const annualNetProfit  = annualRev - annualExp;
-    const roe = equity > 0 ? parseFloat(((annualNetProfit / equity) * 100).toFixed(2)) : null;
+    // Equity for display / fallback: prefer Balance Sheet Total Equity; else A − L.
+    const equity = totalEquity != null
+      ? totalEquity
+      : (totalAssets - totalLiabilities);
+    // ROE = Net Profit ÷ Total Equity (×100 as %). Same P&L net profit and BS
+    // equity the reports show — not annualized revenue − opex.
+    const roeNumerator = netProfit != null ? netProfit : (annualRev - annualExp);
+    const roe = Math.abs(equity) > 0.005
+      ? parseFloat(((roeNumerator / equity) * 100).toFixed(2))
+      : null;
 
     // ── Cost to Income ratio (period) ─────────────────────────────────────────
     const costToIncome = revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(2)) : null;
@@ -2080,11 +2154,14 @@ router.get('/efficiency', async (req, res) => {
         openingPayables: openingPayables == null ? null : Math.round(openingPayables),
         averagePayables: Math.round(averagePayables),
         operatingExpenses: operatingExpenses == null ? null : Math.round(operatingExpenses),
+        otherExpenses: otherExpenses == null ? null : Math.round(otherExpenses),
+        periodDays,
         revenue:     Math.round(revenue),
         expenses:    Math.round(expenses),
         totalAssets: Math.round(totalAssets),
         totalLiabilities: Math.round(totalLiabilities),
         equity:      Math.round(equity),
+        netProfit:   netProfit == null ? null : Math.round(netProfit),
         roe,
         costToIncome,
         arAging, apAging,

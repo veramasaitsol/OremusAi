@@ -41,7 +41,7 @@ function buildRowGroups(currency) {
       title: 'Liquidity',
       rows: [
         { key: 'currentRatio',   label: 'Current Ratio',    fmt: fmtRatioOrNA },
-        { key: 'cashFlowRatio',  label: 'Cash Flow Ratio',  fmt: fmtRatioOrNA },
+        { key: 'cashFlowRatio',  label: 'Cash Flow Ratio',  fmt: fmtPctOrNA },
         { key: 'workingCapital', label: 'Working Capital',  fmt: money },
         { key: 'quickRatio',     label: 'Quick Ratio',      fmt: fmtRatioOrNA },
       ],

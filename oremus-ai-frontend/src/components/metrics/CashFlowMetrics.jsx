@@ -84,7 +84,7 @@ export default function CashFlowMetrics({ from, to, basis, customer, currency })
       {/* KPI row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
         <MiniKpi label="Operating CF" value={ocf == null ? '—' : ocf} sub={ocf == null ? 'not reported' : 'from operations'} color="#06B6D4" icon={Activity} isText={ocf == null} />
-        <MiniKpi label="Free CF"      value={fcf == null ? '—' : fcf} sub={fcf == null ? 'OCF − CapEx' : 'OCF − CapEx'}     color="#8B5CF6" icon={Wallet}  isText={fcf == null} />
+        <MiniKpi label="Free CF"      value={fcf == null ? '—' : fcf} sub="OCF − Gross Fixed Assets" color="#8B5CF6" icon={Wallet}  isText={fcf == null} />
         <MiniKpi label="Net Change"   value={netChange} sub={isHealthy ? 'surplus' : 'deficit'} color={isHealthy ? '#10B981' : '#EF4444'} icon={Activity} />
         <MiniKpi label="Cash Inflow"  value={m.inflow == null ? '—' : m.inflow} sub={m.outflow == null ? '' : `out ${fmtINR(m.outflow)}`} color="#10B981" icon={ArrowDownLeft} isText={m.inflow == null} />
       </div>

@@ -209,15 +209,17 @@ function buildConfigs(data, currency = 'INR') {
       category: 'Liquidity Ratios',
       label: 'Cash flow ratio',
       value: data.cashFlowRatio,
-      min: -2, max: 12,
-      benchmarks: [{ value: 0.8, label: '0.8' }, { value: 1, label: '1' }],
-      color: colorHigher(1, 0.8)(data.cashFlowRatio),
-      fmt: ratio, fmtAxis: ratio,
+      // Stored as a percent (OCF ÷ Current Liabilities × 100). A healthy
+      // cover of liabilities once over is ~100%; 80% is a soft warning.
+      min: -50, max: 200,
+      benchmarks: [{ value: 80, label: '80%' }, { value: 100, label: '100%' }],
+      color: colorHigher(100, 80)(data.cashFlowRatio),
+      fmt: pct, fmtAxis: pctA,
       formula: 'Operating Cash Flow / Current Liabilities',
       interpretations: [
-        '> 1: income all covered by cash flow',
-        '< 0.8: income may not cover obligations',
-        'Indicates number of times cash covers liabilities',
+        '> 100%: cash flow covers current liabilities at least once',
+        '< 80%: income may not cover obligations',
+        'Shows what % of current liabilities operating cash flow covers',
       ],
     },
     {
@@ -299,8 +301,8 @@ function buildConfigs(data, currency = 'INR') {
       benchmarks: [{ value: 30, label: '30' }, { value: 60, label: '60' }],
       color: data.avgDebtorDays != null ? colorLower(30, 60)(data.avgDebtorDays) : GRAY,
       fmt: days, fmtAxis: daysA,
-      formula: '365 / Receivables Turnover',
-      note: '* Same Receivables Turnover figure as the gauge above',
+      formula: '(Accounts Receivable ÷ Revenue) × Days in Period',
+      note: '* Closing AR from Balance Sheet; Revenue from P&L — same as Dashboard',
       interpretations: [
         '< 30: customers pay quickly',
         '> 60: collections cycle is slow',
@@ -316,8 +318,8 @@ function buildConfigs(data, currency = 'INR') {
       benchmarks: [{ value: 30, label: '30' }, { value: 60, label: '60' }],
       color: GRAY,
       fmt: days, fmtAxis: daysA,
-      formula: '(Average AP / Total Operating Expenses) × 365',
-      note: '* Average of opening and closing accounts payable for the period',
+      formula: '(Accounts Payable ÷ Total Expenses) × Days in Period',
+      note: '* Closing AP from Balance Sheet; Total Expenses = Operating + Non-Operating — same as Dashboard',
       interpretations: [
         'Higher: taking longer to pay vendors (more working-capital headroom)',
         'Lower: paying vendors quickly',

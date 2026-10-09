@@ -52,12 +52,6 @@ function pct(numerator, denominator) {
   return r === null ? null : r * 100;
 }
 
-// Day-count ratio (AR/AP Days) — null propagates through instead of 0 days.
-function days365(numerator, denominator) {
-  const r = safe(numerator, denominator);
-  return r === null ? null : r * 365;
-}
-
 function dayBefore(dateStr) {
   const d = new Date(`${dateStr}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() - 1);
@@ -88,8 +82,8 @@ const RE_ACCUM_DEPRECIATION = /accumulated\s*deprecia/i;
 // "Current Liabilities" sections (BS_SUBGROUPS in zohoGlReportsService.js),
 // so these figures — and the Liquidity Metrics card that displays them
 // directly — tie out to that report instead of drifting from it:
-//   currentAssets      = accounts_receivable + other_current_asset (NOT bank —
-//                         the Report lists Bank as its own top-level section)
+//   currentAssets      = bank + cash + accounts_receivable + other_current_asset
+//                         (Bank nests under Current Assets on the report)
 //   currentLiabilities = accounts_payable + other_current_liability (NOT
 //                         credit_card — the Report buckets that separately;
 //                         it still counts toward `debt` below, just not here)
@@ -128,7 +122,7 @@ function bsTotals(bs) {
   let totalEquity = num(bs.netIncome);
   for (const { amount } of bs.equity.values()) totalEquity += amount;
 
-  const currentAssets = ar + otherCurrentAsset;
+  const currentAssets = bank + ar + otherCurrentAsset;
   const currentLiabilities = ap + otherCurrentLiability;
   const hasData = bs.assets.size > 0 || bs.liabilities.size > 0 || bs.equity.size > 0;
 
@@ -143,46 +137,71 @@ function bsTotals(bs) {
 const avg = (a, b) => (a + b) / 2;
 
 /**
+ * Gross Fixed Assets for FCF / CapEx:
+ *   Sum of Balance Sheet fixed_asset accounts that are
+ *     (1) positive at period-end, AND
+ *     (2) different from the prior-period (opening) balance.
+ * Unchanged balances (e.g. Tools still at 1,202.79) are excluded.
+ * Contra / accum. accounts (negative) are excluded by the positive filter.
+ */
+function changedPositiveGrossFixedAssets(bsCloseRaw, bsOpenRaw) {
+  const openAmtById = new Map();
+  for (const [id, a] of (bsOpenRaw?.assets || [])) {
+    if ((a.typeCode || '').toLowerCase() === 'fixed_asset') {
+      openAmtById.set(String(id), num(a.amount));
+    }
+  }
+  let total = 0;
+  for (const [id, a] of (bsCloseRaw?.assets || [])) {
+    if ((a.typeCode || '').toLowerCase() !== 'fixed_asset') continue;
+    const closeAmt = num(a.amount);
+    if (closeAmt <= 0) continue;
+    const openAmt = openAmtById.has(String(id)) ? openAmtById.get(String(id)) : 0;
+    if (Math.abs(closeAmt - openAmt) > 0.005) total += closeAmt;
+  }
+  return total;
+}
+
+/**
  * The reference ratio methodology's simplified indirect-method cash flow —
  * deliberately coarser than a full Statement of Cash Flows (which wants
  * line-item detail: ΔAR, ΔAP, ΔInventory each their own row — that's what
  * zohoLedgerReportsService.aggregateIndirectCashFlow / buildCashFlow are for,
  * and this does NOT replace them). This is the "metrics/ratios" version:
  *   operatingCashFlow = Net Profit + Depreciation − Change in Working Capital
- *   changeInWorkingCapital = (Current Assets − Current Liabilities) this
- *     period-end minus the same at the period's start, where Current Assets
- *     (bsTotals, above) EXCLUDES Cash & Bank — both to match the Balance
- *     Sheet Report's own "Current Assets" section, and because Cash is the
- *     figure the cash-flow statement exists to explain: folding its own
- *     movement into "change in working capital" would net it against itself.
- *     E.g. a company that earns $100 and collects every rupee of it in cash
- *     (nothing else moves) would show wcClose − wcOpen = +$100 and
- *     OCF = 100 + 0 − 100 = 0 if cash were included, even though it generated
- *     a real $100 of operating cash.
- *   capex = Gross Fixed Assets (cost, before depreciation) this period-end
- *     minus at the period's start — signed, not floored at 0 (a net disposal
- *     period can show negative capex)
- *   freeCashFlow = operatingCashFlow − capex
+ *   Working Capital   = Current Assets − Current Liabilities
+ *                       (same Current Assets as the Balance Sheet Report,
+ *                       including Bank & Cash)
+ *   changeInWorkingCapital = WC(as of `to`) − WC(as of day before `from`)
+ *   Depreciation      = Depreciation + Amortization from the P&L
+ *   grossFixedAssets  = sum of positive fixed_asset closing balances that
+ *     changed vs the prior period (see changedPositiveGrossFixedAssets)
+ *   capex             = same figure (period fixed-asset additions)
+ *   freeCashFlow      = operatingCashFlow − grossFixedAssets
  *   netChange = Cash & Bank this period-end minus at the period's start —
- *     computed directly, NOT derived from operatingCashFlow/capex, so it
- *     stays a plain, independently-measured fact even though it now
- *     approximately reconciles with OCF − capex (± financing activity, which
- *     this module doesn't track separately).
+ *     computed directly, NOT derived from operatingCashFlow/FCF, so it
+ *     stays a plain, independently-measured fact.
  * `null` for every field when there's no prior-period snapshot to diff
  * against (a brand-new client) — never a fabricated 0.
  */
-function deriveCashFlowMetrics(pl, pli, close, open, hasOpening) {
+function deriveCashFlowMetrics(pl, pli, close, open, hasOpening, bsCloseRaw, bsOpenRaw) {
   if (!hasOpening) {
-    return { operatingCashFlow: null, changeInWorkingCapital: null, capex: null, freeCashFlow: null, netChange: null };
+    return {
+      operatingCashFlow: null, changeInWorkingCapital: null,
+      capex: null, freeCashFlow: null, netChange: null, grossFixedAssets: null,
+    };
   }
+  // WC matches Liquidity / Balance Sheet: Current Assets (incl. Bank) − CL.
   const wcClose = close.currentAssets - close.currentLiabilities;
   const wcOpen = open.currentAssets - open.currentLiabilities;
   const changeInWorkingCapital = r2(wcClose - wcOpen);
   const operatingCashFlow = r2(pl.netProfit + pli.depreciation - changeInWorkingCapital);
-  const capex = r2(close.grossFixedAssets - open.grossFixedAssets);
-  const freeCashFlow = r2(operatingCashFlow - capex);
+  const grossFixedAssets = r2(changedPositiveGrossFixedAssets(bsCloseRaw, bsOpenRaw));
+  const capex = grossFixedAssets;
+  // FCF = OCF − Gross Fixed Assets (positive, changed-vs-prior only).
+  const freeCashFlow = r2(operatingCashFlow - grossFixedAssets);
   const netChange = r2(close.bank - open.bank);
-  return { operatingCashFlow, changeInWorkingCapital, capex, freeCashFlow, netChange };
+  return { operatingCashFlow, changeInWorkingCapital, capex, freeCashFlow, netChange, grossFixedAssets };
 }
 function r2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
@@ -205,14 +224,15 @@ async function computeCashFlowMetrics(userId, orgId, platform, from, to, fyStart
   const close = bsTotals(bsCloseRaw);
   const open = bsTotals(bsOpenRaw);
   const hasOpening = open.hasData;
-  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening);
+  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening, bsCloseRaw, bsOpenRaw);
   return {
     ...cf,
     netProfit: pl.netProfit,
     depreciation: pli.depreciation,
     currentAssets: close.currentAssets,
     currentLiabilities: close.currentLiabilities,
-    grossFixedAssets: close.grossFixedAssets,
+    // Prefer the FCF/CapEx GFA (positive + changed); fall back to BS total.
+    grossFixedAssets: cf.grossFixedAssets != null ? cf.grossFixedAssets : close.grossFixedAssets,
     cash: close.bank,
     hasOpeningPeriodData: hasOpening,
     from, to, asOfOpen, asOfClose: to, platform, fyStartMonth,
@@ -223,9 +243,9 @@ async function computeCashFlowMetrics(userId, orgId, platform, from, to, fyStart
  * computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth)
  * Returns { ratios, raw }. `ratios` values are `null` when genuinely N/A
  * (no data for that figure), never a fabricated 0. Percent-style ratios
- * (margins, ROE, ROI) are scaled ×100; multiples (Current Ratio, Equity
- * Multiplier, turnover ratios, …) are plain numbers; day-count ratios (AR/AP
- * Days) are days.
+ * (margins, ROE, ROI, Cash Flow Ratio) are scaled ×100; multiples (Current
+ * Ratio, Equity Multiplier, turnover ratios, …) are plain numbers; day-count
+ * ratios (AR/AP Days) are days.
  */
 async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth = 4) {
   const asOfClose = to;
@@ -245,7 +265,7 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
   // uses (deriveCashFlowMetrics, above) — computed here from data already
   // fetched, not by calling computeCashFlowMetrics again, so Ratios and the
   // Dashboard can never disagree without an extra DB round-trip.
-  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening);
+  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening, bsCloseRaw, bsOpenRaw);
 
   const plFull = { ...pl, depreciation: pli.depreciation };
   const m = margins(pl); // { grossMargin, operatingMargin, netMargin } — %, revenue-based, null if revenue<=0
@@ -253,15 +273,14 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
 
   const totalAssetsCloseAbs = Math.abs(close.totalAssets);
   const totalAssetsOpenAbs = Math.abs(open.totalAssets);
-  // close.currentAssets already excludes Bank & Cash (see bsTotals, above —
-  // matches the Balance Sheet Report's "Current Assets" section).
+  // close.currentAssets matches the Balance Sheet Report's "Current Assets"
+  // section (includes Bank & Cash — see bsTotals / BS_SUBGROUPS).
   const currentAssetsCloseAbs = Math.abs(close.currentAssets);
   const currentLiabilitiesCloseAbs = Math.abs(close.currentLiabilities);
 
   const avgTotalAssetsAbs = hasOpening ? avg(totalAssetsOpenAbs, totalAssetsCloseAbs) : null;
   const avgEquity = hasOpening ? avg(open.totalEquity, close.totalEquity) : null;
   const avgAR = hasOpening ? avg(open.ar, close.ar) : null;
-  const avgAP = hasOpening ? avg(open.ap, close.ap) : null;
 
   const receivablesTurnover = safe(pl.revenue, avgAR);
   const assetTurnover = safe(pl.revenue, avgTotalAssetsAbs);
@@ -280,6 +299,22 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
   // available) rather than silently assuming a repayment amount.
   const dscr = null;
 
+  // AR / AP Days — same formulas as the Dashboard Efficiency card:
+  //   AR Days = (Closing AR ÷ Revenue) × periodDays
+  //   AP Days = (Closing AP ÷ (Operating + Non-Operating Expense)) × periodDays
+  // Closing AR/AP from the Balance Sheet as of `to`; Revenue / Expenses from
+  // the P&L for [from, to]. periodDays is inclusive (full FY ≈ 365).
+  const periodDays = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
+  const closingAR = Math.abs(close.ar);
+  const closingAP = Math.abs(close.ap);
+  const apExpenseBase = num(pl.opex) + num(pl.otherExpense);
+  const avgDebtorDays = pl.revenue > 0
+    ? Math.round((closingAR / pl.revenue) * periodDays)
+    : null;
+  const avgPayableDays = apExpenseBase > 0
+    ? Math.round((closingAP / apExpenseBase) * periodDays)
+    : null;
+
   const ratios = {
     grossProfitMargin: m.grossMargin,
     operatingMargin:   m.operatingMargin,
@@ -288,7 +323,11 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
     currentRatio:   safe(currentAssetsCloseAbs, currentLiabilitiesCloseAbs),
     quickRatio:     safe(close.bank + close.ar, currentLiabilitiesCloseAbs),
     workingCapital: close.hasData ? (close.currentAssets - close.currentLiabilities) : null,
-    cashFlowRatio:  cf.operatingCashFlow != null ? safe(cf.operatingCashFlow, currentLiabilitiesCloseAbs) : null,
+    // Cash Flow Ratio = Operating Cash Flow ÷ Current Liabilities, as a %
+    // (same scaling as ROE / margins). E.g. OCF 32,064 / CL 1,183,867 ≈ 2.71%.
+    cashFlowRatio:  cf.operatingCashFlow != null
+      ? pct(cf.operatingCashFlow, currentLiabilitiesCloseAbs)
+      : null,
 
     // `returnOnEquity` = closing-equity basis, kept under its original name
     // (the existing Ratios page gauge reads this key); `returnOnEquityAverage`
@@ -303,8 +342,8 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
     receivablesTurnover,
     inventoryTurnover,
     daysInventoryOutstanding,
-    avgDebtorDays: receivablesTurnover ? 365 / receivablesTurnover : null,
-    avgPayableDays: hasOpening ? days365(avgAP, pl.opex) : null,
+    avgDebtorDays,
+    avgPayableDays,
 
     debtToEquity:      close.hasData ? safe(close.debt, close.totalEquity) : null,
     debtServiceCoverage: dscr,
@@ -316,10 +355,12 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
     ratios,
     raw: {
       revenue: pl.revenue, otherIncome: pl.otherIncome, cogs: pl.cogs, opex: pl.opex,
+      otherExpense: pl.otherExpense,
       grossProfit: pl.grossProfit, operatingProfit: pl.operatingProfit, netProfit: pl.netProfit,
       depreciation: pli.depreciation, interestExpense: pli.interestExpense, incomeTax: pli.incomeTax,
       ebitda: ebitda.ebitda, ebitdaMargin: ebitda.ebitdaMargin,
       operatingCashFlow: cf.operatingCashFlow, changeInWorkingCapital: cf.changeInWorkingCapital,
+      grossFixedAssets: cf.grossFixedAssets,
       capex: cf.capex, freeCashFlow: cf.freeCashFlow, netChange: cf.netChange,
       totalAssets: close.totalAssets, currentAssets: close.currentAssets,
       totalLiabilities: close.totalLiabilities, currentLiabilities: close.currentLiabilities,

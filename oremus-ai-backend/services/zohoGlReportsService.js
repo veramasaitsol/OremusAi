@@ -750,8 +750,16 @@ async function aggregateBS(userId, orgId, platform, asOf, earningsFrom = null, f
 // not listed lands in a trailing "Other <Section>" bucket so nothing is lost.
 const BS_SUBGROUPS = {
   assets: [
-    { key: 'bank',       label: 'Bank',               codes: ['bank', 'cash'] },
-    { key: 'current',    label: 'Current Assets',     codes: ['accounts_receivable', 'other_current_asset'] },
+    // Current Assets accordion; Bank is a nested group inside it (not flat
+    // bank lines mixed with AR / other current assets).
+    {
+      key: 'current',
+      label: 'Current Assets',
+      codes: ['bank', 'cash', 'accounts_receivable', 'other_current_asset'],
+      children: [
+        { key: 'bank', label: 'Bank', codes: ['bank', 'cash'] },
+      ],
+    },
     { key: 'fixed',      label: 'Fixed Assets',       codes: ['fixed_asset'] },
     { key: 'noncurrent', label: 'Non-current Assets', codes: ['other_asset'] },
   ],
@@ -924,29 +932,62 @@ async function buildBalanceSheet(userId, params = {}) {
 
     if (subgroupDefs && subgroupDefs.length) {
       const codeToGroup = {};
-      subgroupDefs.forEach((g) => g.codes.forEach((c) => { codeToGroup[c] = g.key; }));
+      subgroupDefs.forEach((g) => (g.codes || []).forEach((c) => { codeToGroup[c] = g.key; }));
       const buckets = new Map();
-      const groupLabel = {};
-      subgroupDefs.forEach((g) => { buckets.set(g.key, []); groupLabel[g.key] = g.label; });
+      const groupByKey = {};
+      subgroupDefs.forEach((g) => { buckets.set(g.key, []); groupByKey[g.key] = g; });
       for (const id of order) {
         const gk = codeToGroup[meta[id].typeCode] || '__other__';
-        if (!buckets.has(gk)) { buckets.set(gk, []); groupLabel[gk] = `Other ${title}`; }
+        if (!buckets.has(gk)) {
+          buckets.set(gk, []);
+          groupByKey[gk] = { key: gk, label: `Other ${title}`, codes: [] };
+        }
         buckets.get(gk).push(id);
       }
-      for (const [gk, ids] of buckets) {
-        if (!ids.length) continue;
-        rows.push({ label: groupLabel[gk], isHeader: true, level: 1 + levelOffset });
-        emitLeaves(ids, 2 + levelOffset);
+
+      // Emit one subgroup. Optional `children` nest a further accordion (e.g.
+      // Bank under Current Assets) before any leftover leaf accounts.
+      const emitGroup = (g, ids, headerLevel) => {
+        if (!ids.length) return;
+        const label = g.label || `Other ${title}`;
+        rows.push({ label, isHeader: true, level: headerLevel });
+
+        const childDefs = Array.isArray(g.children) ? g.children : [];
+        const nestedIds = new Set();
+        for (const child of childDefs) {
+          const childIds = ids.filter((id) => (child.codes || []).includes(meta[id].typeCode));
+          if (!childIds.length) continue;
+          childIds.forEach((id) => nestedIds.add(id));
+          rows.push({ label: child.label, isHeader: true, level: headerLevel + 1 });
+          emitLeaves(childIds, headerLevel + 2);
+          const childTotals = periods.map((_, i) => r2(childIds.reduce((s, id) => s + amt(mapKey, id, i), 0)));
+          const childClosing = r2(childIds.reduce((s, id) => s + closingOf(mapKey, id), 0));
+          rows.push({
+            label: `Total ${child.label}`,
+            isSubtotal: true,
+            level: headerLevel + 1,
+            breakdown: leafComponents(childIds),
+            cells: { ...cellsFrom((i) => childTotals[i]), closing: childClosing },
+          });
+        }
+
+        const directIds = ids.filter((id) => !nestedIds.has(id));
+        if (directIds.length) emitLeaves(directIds, headerLevel + 1);
+
         const subTotals = periods.map((_, i) => r2(ids.reduce((s, id) => s + amt(mapKey, id, i), 0)));
         const subClosing = r2(ids.reduce((s, id) => s + closingOf(mapKey, id), 0));
         rows.push({
-          label: `Total ${groupLabel[gk]}`,
+          label: `Total ${label}`,
           isSubtotal: true,
-          level: 1 + levelOffset,
+          level: headerLevel,
           breakdown: leafComponents(ids),
           cells: { ...cellsFrom((i) => subTotals[i]), closing: subClosing },
         });
         periods.forEach((_, i) => { sectionTotals[i] += subTotals[i]; });
+      };
+
+      for (const [gk, ids] of buckets) {
+        emitGroup(groupByKey[gk], ids, 1 + levelOffset);
       }
     } else {
       emitLeaves(order, 1 + levelOffset);
