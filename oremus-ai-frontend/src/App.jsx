@@ -11,6 +11,7 @@ export default function App() {
 
   return (
     <>
+    <h1>hellow world</h1>
       <AppRoutes />
       <Toaster />
     </>
