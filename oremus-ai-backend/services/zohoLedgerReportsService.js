@@ -743,13 +743,27 @@ async function computePLFigures(userId, orgId, platform, from, to) {
 }
 
 /**
+ * Gross Fixed Assets / CapEx proxy from the Cash Flow Statement:
+ * sum the negative line amounts under Investing Activities (cash outflows
+ * for asset purchases), then take the absolute value so FCF = OCF − GFA
+ * stays a positive subtraction. Same accounts/adj engine as buildCashFlow.
+ */
+function sumNegativeInvestingOutflows(cfAccounts) {
+  let sumNeg = 0;
+  for (const { section, adj } of cfAccounts.values()) {
+    if (section === 'investing' && Number(adj) < 0) sumNeg += Number(adj);
+  }
+  return r2(Math.abs(sumNeg));
+}
+
+/**
  * computeCashFlowFigures(userId, orgId, platform, from, to) → flat cash-flow
  * numbers.  Uses the same engine as the Cash Flow Statement report so the
  * Ratios endpoint ties out exactly.
  *
  * Returns:
  *   { netIncome, operatingCashFlow, investingCashFlow, financingCashFlow,
- *     netCashChange, openingCash, closingCash }
+ *     netCashChange, openingCash, closingCash, investingOutflows }
  */
 async function computeCashFlowFigures(userId, orgId, platform, from, to) {
   const cf = await aggregateIndirectCashFlow(userId, orgId, platform, from, to);
@@ -759,6 +773,7 @@ async function computeCashFlowFigures(userId, orgId, platform, from, to) {
     operatingCashFlow: r2(cf.netIncome + cf.sectionNet.operating),
     investingCashFlow: r2(cf.sectionNet.investing),
     financingCashFlow: r2(cf.sectionNet.financing),
+    investingOutflows: sumNegativeInvestingOutflows(cf.accounts),
     netCashChange:     cf.net,
     openingCash:       open,
     closingCash:       r2(open + cf.net),
@@ -806,4 +821,8 @@ async function extractPLLineItems(userId, orgId, from, to) {
   };
 }
 
-module.exports = { buildProfitAndLoss, buildCashFlow, buildExpenseDetails, buildPeriods, computePLFigures, computeCashFlowFigures, extractPLLineItems, aggregatePL };
+module.exports = {
+  buildProfitAndLoss, buildCashFlow, buildExpenseDetails, buildPeriods,
+  computePLFigures, computeCashFlowFigures, extractPLLineItems, aggregatePL,
+  aggregateIndirectCashFlow, sumNegativeInvestingOutflows,
+};

@@ -28,7 +28,10 @@
  * independently-drifting implementations.
  */
 
-const { computePLFigures, extractPLLineItems } = require('./zohoLedgerReportsService');
+const {
+  computePLFigures, extractPLLineItems,
+  aggregateIndirectCashFlow, sumNegativeInvestingOutflows,
+} = require('./zohoLedgerReportsService');
 const { aggregateBS } = require('./zohoGlReportsService');
 const { margins, deriveEbitda } = require('./metricsService');
 
@@ -137,32 +140,6 @@ function bsTotals(bs) {
 const avg = (a, b) => (a + b) / 2;
 
 /**
- * Gross Fixed Assets for FCF / CapEx:
- *   Sum of Balance Sheet fixed_asset accounts that are
- *     (1) positive at period-end, AND
- *     (2) different from the prior-period (opening) balance.
- * Unchanged balances (e.g. Tools still at 1,202.79) are excluded.
- * Contra / accum. accounts (negative) are excluded by the positive filter.
- */
-function changedPositiveGrossFixedAssets(bsCloseRaw, bsOpenRaw) {
-  const openAmtById = new Map();
-  for (const [id, a] of (bsOpenRaw?.assets || [])) {
-    if ((a.typeCode || '').toLowerCase() === 'fixed_asset') {
-      openAmtById.set(String(id), num(a.amount));
-    }
-  }
-  let total = 0;
-  for (const [id, a] of (bsCloseRaw?.assets || [])) {
-    if ((a.typeCode || '').toLowerCase() !== 'fixed_asset') continue;
-    const closeAmt = num(a.amount);
-    if (closeAmt <= 0) continue;
-    const openAmt = openAmtById.has(String(id)) ? openAmtById.get(String(id)) : 0;
-    if (Math.abs(closeAmt - openAmt) > 0.005) total += closeAmt;
-  }
-  return total;
-}
-
-/**
  * The reference ratio methodology's simplified indirect-method cash flow —
  * deliberately coarser than a full Statement of Cash Flows (which wants
  * line-item detail: ΔAR, ΔAP, ΔInventory each their own row — that's what
@@ -174,17 +151,18 @@ function changedPositiveGrossFixedAssets(bsCloseRaw, bsOpenRaw) {
  *                       including Bank & Cash)
  *   changeInWorkingCapital = WC(as of `to`) − WC(as of day before `from`)
  *   Depreciation      = Depreciation + Amortization from the P&L
- *   grossFixedAssets  = sum of positive fixed_asset closing balances that
- *     changed vs the prior period (see changedPositiveGrossFixedAssets)
- *   capex             = same figure (period fixed-asset additions)
+ *   grossFixedAssets  = |Σ negative Investing Activities lines| from the
+ *     Cash Flow Statement (same engine as the report)
+ *   capex             = same figure
  *   freeCashFlow      = operatingCashFlow − grossFixedAssets
  *   netChange = Cash & Bank this period-end minus at the period's start —
  *     computed directly, NOT derived from operatingCashFlow/FCF, so it
  *     stays a plain, independently-measured fact.
- * `null` for every field when there's no prior-period snapshot to diff
- * against (a brand-new client) — never a fabricated 0.
+ * `investingOutflows` is the precomputed GFA from the CF report (null when
+ * unavailable). `null` for every field when there's no prior-period snapshot
+ * to diff against (a brand-new client) — never a fabricated 0.
  */
-function deriveCashFlowMetrics(pl, pli, close, open, hasOpening, bsCloseRaw, bsOpenRaw) {
+function deriveCashFlowMetrics(pl, pli, close, open, hasOpening, investingOutflows) {
   if (!hasOpening) {
     return {
       operatingCashFlow: null, changeInWorkingCapital: null,
@@ -196,10 +174,12 @@ function deriveCashFlowMetrics(pl, pli, close, open, hasOpening, bsCloseRaw, bsO
   const wcOpen = open.currentAssets - open.currentLiabilities;
   const changeInWorkingCapital = r2(wcClose - wcOpen);
   const operatingCashFlow = r2(pl.netProfit + pli.depreciation - changeInWorkingCapital);
-  const grossFixedAssets = r2(changedPositiveGrossFixedAssets(bsCloseRaw, bsOpenRaw));
+  // GFA = abs(sum of negative Investing Activities lines on the CF Statement).
+  const grossFixedAssets = investingOutflows == null ? null : r2(investingOutflows);
   const capex = grossFixedAssets;
-  // FCF = OCF − Gross Fixed Assets (positive, changed-vs-prior only).
-  const freeCashFlow = r2(operatingCashFlow - grossFixedAssets);
+  const freeCashFlow = grossFixedAssets == null
+    ? null
+    : r2(operatingCashFlow - grossFixedAssets);
   const netChange = r2(close.bank - open.bank);
   return { operatingCashFlow, changeInWorkingCapital, capex, freeCashFlow, netChange, grossFixedAssets };
 }
@@ -215,23 +195,25 @@ function r2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
  */
 async function computeCashFlowMetrics(userId, orgId, platform, from, to, fyStartMonth = 4) {
   const asOfOpen = dayBefore(from);
-  const [pl, pli, bsCloseRaw, bsOpenRaw] = await Promise.all([
+  const [pl, pli, bsCloseRaw, bsOpenRaw, cfStmt] = await Promise.all([
     computePLFigures(userId, orgId, null, from, to),
     extractPLLineItems(userId, orgId, from, to),
     aggregateBS(userId, orgId, null, to, null, fyStartMonth),
     aggregateBS(userId, orgId, null, asOfOpen, null, fyStartMonth),
+    // Same Investing Activities lines the Cash Flow Statement report shows.
+    aggregateIndirectCashFlow(userId, orgId, null, from, to),
   ]);
   const close = bsTotals(bsCloseRaw);
   const open = bsTotals(bsOpenRaw);
   const hasOpening = open.hasData;
-  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening, bsCloseRaw, bsOpenRaw);
+  const investingOutflows = sumNegativeInvestingOutflows(cfStmt.accounts);
+  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening, investingOutflows);
   return {
     ...cf,
     netProfit: pl.netProfit,
     depreciation: pli.depreciation,
     currentAssets: close.currentAssets,
     currentLiabilities: close.currentLiabilities,
-    // Prefer the FCF/CapEx GFA (positive + changed); fall back to BS total.
     grossFixedAssets: cf.grossFixedAssets != null ? cf.grossFixedAssets : close.grossFixedAssets,
     cash: close.bank,
     hasOpeningPeriodData: hasOpening,
@@ -251,11 +233,13 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
   const asOfClose = to;
   const asOfOpen = dayBefore(from);
 
-  const [pl, pli, bsCloseRaw, bsOpenRaw] = await Promise.all([
+  const [pl, pli, bsCloseRaw, bsOpenRaw, cfStmt] = await Promise.all([
     computePLFigures(userId, orgId, null, from, to),
     extractPLLineItems(userId, orgId, from, to),
     aggregateBS(userId, orgId, null, asOfClose, null, fyStartMonth),
     aggregateBS(userId, orgId, null, asOfOpen, null, fyStartMonth),
+    // Same Investing Activities lines the Cash Flow Statement report shows.
+    aggregateIndirectCashFlow(userId, orgId, null, from, to),
   ]);
 
   const close = bsTotals(bsCloseRaw);
@@ -265,7 +249,9 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
   // uses (deriveCashFlowMetrics, above) — computed here from data already
   // fetched, not by calling computeCashFlowMetrics again, so Ratios and the
   // Dashboard can never disagree without an extra DB round-trip.
-  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening, bsCloseRaw, bsOpenRaw);
+  // GFA = |Σ negative Investing Activities| from the Cash Flow Statement.
+  const investingOutflows = sumNegativeInvestingOutflows(cfStmt.accounts);
+  const cf = deriveCashFlowMetrics(pl, pli, close, open, hasOpening, investingOutflows);
 
   const plFull = { ...pl, depreciation: pli.depreciation };
   const m = margins(pl); // { grossMargin, operatingMargin, netMargin } — %, revenue-based, null if revenue<=0
