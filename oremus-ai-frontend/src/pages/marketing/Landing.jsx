@@ -48,7 +48,6 @@ export default function Landing() {
 
   return (
     <>
-    <h1>hwllo </h1>
       <Seo fullTitle="Oremus AI — Financial Analytics & Reporting Platform" />
       <JsonLd data={faqLd} />
       <JsonLd data={productLd} />
