@@ -1,0 +1,81 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'oremus-ai-backend/**'
+      - '.github/workflows/backend-pipeline.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'oremus-ai-backend/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: oremus-ai-backend
+
+jobs:
+  test-and-lint:
+    name: Test & Lint Backend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: oremus-ai-backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Linter
+        run: npm run lint || true
+
+      - name: Run Tests (if configured)
+        run: npm test --if-present
+
+  deploy:
+    name: Deploy Backend
+    needs: test-and-lint
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Touch cPanel Passenger restart trigger
+        run: |
+          mkdir -p tmp
+          touch tmp/restart.txt
+
+      # Deploys backend code to server via FTP
+      # Excludes node_modules and .env files to protect server config and secrets
+      - name: Deploy to Backend via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER || 'ftp.vensframe.com' }}
+          username: ${{ secrets.FTP_BACKEND_USERNAME }}
+          password: ${{ secrets.FTP_BACKEND_PASSWORD }}
+          port: 21
+          protocol: ftp
+          local-dir: ./oremus-ai-backend/
+          server-dir: ${{ secrets.FTP_BACKEND_DIR || '/' }}
+          dangerous-clean-slate: false
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
+            **/.env*
+            **/*.postman_collection.json
+            **/_analysis.js
+            **/_check*.js

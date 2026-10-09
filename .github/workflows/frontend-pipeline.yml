@@ -1,0 +1,88 @@
+name: Frontend CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'oremus-ai-frontend/**'
+      - '.github/workflows/frontend-pipeline.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'oremus-ai-frontend/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: oremus-ai-frontend
+
+jobs:
+  build:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: oremus-ai-frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Vite application
+        run: npm run build
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_AI_API_URL: ${{ secrets.VITE_AI_API_URL }}
+          VITE_SITE_URL: ${{ secrets.VITE_SITE_URL }}
+          VITE_ZOHO_CLIENT_ID: ${{ secrets.VITE_ZOHO_CLIENT_ID }}
+          VITE_ZOHO_REDIRECT_URI: ${{ secrets.VITE_ZOHO_REDIRECT_URI }}
+          VITE_ZOHO_API_BASE: ${{ secrets.VITE_ZOHO_API_BASE }}
+          VITE_ZOHO_ACCOUNTS_URL: ${{ secrets.VITE_ZOHO_ACCOUNTS_URL }}
+          VITE_ZOHO_AUTH_URL: ${{ secrets.VITE_ZOHO_AUTH_URL }}
+          VITE_ZOHO_TOKEN_URL: ${{ secrets.VITE_ZOHO_TOKEN_URL }}
+          VITE_ZOHO_ORG_ID: ${{ secrets.VITE_ZOHO_ORG_ID }}
+          VITE_QBO_ENV: ${{ secrets.VITE_QBO_ENV }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: oremus-ai-frontend/dist/
+          retention-days: 7
+
+  deploy:
+    name: Deploy Frontend
+    needs: build
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: oremus-ai-frontend/dist/
+
+      - name: Deploy to Frontend via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER || 'ftp.vensframe.com' }}
+          username: ${{ secrets.FTP_FRONTEND_USERNAME }}
+          password: ${{ secrets.FTP_FRONTEND_PASSWORD }}
+          port: 21
+          protocol: ftp
+          local-dir: ./oremus-ai-frontend/dist/
+          server-dir: ${{ secrets.FTP_FRONTEND_DIR || '/' }}
+          dangerous-clean-slate: false
