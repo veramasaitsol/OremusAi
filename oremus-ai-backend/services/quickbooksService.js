@@ -714,6 +714,31 @@ async function buildQboCurrencyMap(realmId, accessToken, environment, neededEnti
   return map;
 }
 
+// account_transactions.memo: the GL's Memo column, kept apart from
+// `transaction_details` (its Name, else the memo) because the Transaction List
+// by Vendor prints a transaction's memo even when it names a vendor. Stored as
+// '' when QuickBooks has none, so NULL marks a line synced before the column
+// existed. Added once per deployment (as db/account-transactions-memo.sql
+// does); if that fails, the sync carries on without memos.
+let ledgerMemoReady = null;
+function ensureLedgerMemoColumn() {
+  if (!ledgerMemoReady) {
+    ledgerMemoReady = (async () => {
+      const [[col]] = await pool.execute(
+        `SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'account_transactions' AND COLUMN_NAME = 'memo'`
+      );
+      if (!Number(col.n)) await pool.execute('ALTER TABLE account_transactions ADD COLUMN memo TEXT NULL');
+      return true;
+    })().catch((e) => {
+      ledgerMemoReady = null;
+      console.warn('[QBO GL] memo column unavailable, syncing without memos:', e.message);
+      return false;
+    });
+  }
+  return ledgerMemoReady;
+}
+
 async function syncGeneralLedger(userId, accessToken, realmId, environment) {
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const qboReports = require('./quickbooksReportsService');
@@ -765,6 +790,7 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
   // 3) Replace existing GL lines (KEEP the AccountBalance snapshot rows from
   //    syncAccounts — they carry transaction_date = NULL / debit = credit = 0 so
   //    the sum-based builders ignore them) and insert the fresh ledger.
+  const withMemo = await ensureLedgerMemoColumn();
   const conn = await pool.getConnection();
   let n = 0;
   try {
@@ -802,8 +828,8 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
             account_name, account_group, account_type_code, transaction_details,
             transaction_type, transaction_number, reference_number,
             debit, credit, balance, balance_type,
-            source_type, source_id, line_number, tax_type, tax_amount, currency_code, synced_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())`,
+            source_type, source_id, line_number, tax_type, tax_amount, currency_code,${withMemo ? ' memo,' : ''} synced_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,${withMemo ? '?,' : ''}NOW())`,
         [
           userId, String(realmId), 'quickbooks', txnId, ref, date,
           acct.name || r.cells?.account || null,
@@ -828,6 +854,7 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
           null,
           0,
           currencyCode,
+          ...(withMemo ? [r.cells?.memo || ''] : []),
         ]
       );
       idx += 1; n += 1;
@@ -1025,6 +1052,14 @@ async function syncAccounts(userId, accessToken, realmId, environment) {
 // the BillPayment entities: one row per payment line with the document it
 // settled (LinkedTxn: Bill, VendorCredit, JournalEntry, Deposit…), its
 // amount and the payment date. Replaced per company on every sync.
+// The payment's own number, kind and memo are kept for the Transaction List by
+// Vendor, which prints payments that only applied credits — $0, so absent from
+// the GeneralLedger report.
+const AP_LINK_PAYMENT_COLUMNS = {
+  doc_number: 'VARCHAR(64) NULL',
+  pay_type:   'VARCHAR(16) NULL',
+  memo:       'TEXT NULL',
+};
 async function ensureApLinksTable() {
   await pool.execute(
     `CREATE TABLE IF NOT EXISTS qbo_ap_links (
@@ -1043,6 +1078,17 @@ async function ensureApLinksTable() {
        KEY idx_payment (org_id, payment_id)
      )`
   );
+  const [cols] = await pool.execute(
+    `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'qbo_ap_links'`
+  );
+  const have = new Set(cols.map((c) => c.name));
+  for (const [name, type] of Object.entries(AP_LINK_PAYMENT_COLUMNS)) {
+    if (have.has(name)) continue;
+    // Another company's sync may add it first.
+    await pool.execute(`ALTER TABLE qbo_ap_links ADD COLUMN ${name} ${type}`)
+      .catch((e) => { if (e.code !== 'ER_DUP_FIELDNAME') throw e; });
+  }
 }
 
 async function syncApLinks(userId, accessToken, realmId, environment) {
@@ -1050,17 +1096,17 @@ async function syncApLinks(userId, accessToken, realmId, environment) {
   await ensureApLinksTable();
   const rows = [];
   for (const p of payments) {
+    const payment = [userId, String(realmId), String(p.Id), p.TxnDate || null, Number(p.TotalAmt) || 0,
+      p.VendorRef?.name || null, p.DocNumber || null, p.PayType || null, p.PrivateNote || null];
     for (const ln of p.Line || []) {
       for (const t of ln.LinkedTxn || []) {
         if (!t.TxnId || !t.TxnType) continue;
-        rows.push([userId, String(realmId), String(p.Id), p.TxnDate || null, Number(p.TotalAmt) || 0,
-          p.VendorRef?.name || null, String(t.TxnType), String(t.TxnId), Number(ln.Amount) || 0]);
+        rows.push([...payment, String(t.TxnType), String(t.TxnId), Number(ln.Amount) || 0]);
       }
     }
     // A payment with no applied lines still exists (fully unapplied).
     if (!(p.Line || []).some((ln) => (ln.LinkedTxn || []).length)) {
-      rows.push([userId, String(realmId), String(p.Id), p.TxnDate || null, Number(p.TotalAmt) || 0,
-        p.VendorRef?.name || null, 'None', '', 0]);
+      rows.push([...payment, 'None', '', 0]);
     }
   }
   const conn = await pool.getConnection();
@@ -1071,7 +1117,8 @@ async function syncApLinks(userId, accessToken, realmId, environment) {
       const chunk = rows.slice(i, i + 500);
       await conn.query(
         `INSERT INTO qbo_ap_links
-           (user_id, org_id, payment_id, payment_date, payment_total, vendor_name, target_type, target_id, amount)
+           (user_id, org_id, payment_id, payment_date, payment_total, vendor_name, doc_number, pay_type, memo,
+            target_type, target_id, amount)
          VALUES ?`, [chunk]);
     }
     await conn.commit();
