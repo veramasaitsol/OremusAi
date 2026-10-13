@@ -283,11 +283,11 @@ async function qboDocumentDetails(userId, orgId, from, to) {
 // number, kind, memo, total in the payment's own currency, and the documents
 // each settled. Empty until a sync has given the table these columns; rows
 // synced before then have no number, kind or memo.
-async function qboBillPayments(orgId, from, to) {
+async function qboBillPayments(userId, orgId, from, to) {
   const [rows] = await pool.execute(
     `SELECT payment_id, payment_date, payment_total, vendor_name, doc_number, pay_type, memo, target_id
-       FROM qbo_ap_links WHERE org_id = ? AND payment_date BETWEEN ? AND ?`,
-    [String(orgId), from, to]
+       FROM qbo_ap_links WHERE org_id = ? AND user_id = ? AND payment_date BETWEEN ? AND ?`,
+    [String(orgId), userId, from, to]
   ).catch(() => [[]]);
   const text = (v) => String(v || '').trim();
   const payments = new Map();
@@ -436,7 +436,7 @@ async function qboEntries(userId, orgId, from, to, lines) {
     qboVendorNames(userId, orgId),
     qboAccountNames(userId, orgId),
     qboDocumentDetails(userId, orgId, from, to),
-    qboBillPayments(orgId, from, to),
+    qboBillPayments(userId, orgId, from, to),
   ]);
   const docs = [...qboDocuments(lines).values()];
   // A payment that only applied credits moved no money, so the ledger has no

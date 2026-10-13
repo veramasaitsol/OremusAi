@@ -315,6 +315,7 @@ async function buildProfitAndLoss(userId, params = {}) {
   const orgId = await resolveOrgId(userId, params);
   requireOrg(orgId);
   const platform = resolvePlatform(params);
+  console.log(platform, 'platform');
   const { from, to } = resolveRange(params);
 
   const periods = buildPeriods(from, to, params);

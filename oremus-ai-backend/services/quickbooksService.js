@@ -1089,6 +1089,17 @@ async function ensureApLinksTable() {
     await pool.execute(`ALTER TABLE qbo_ap_links ADD COLUMN ${name} ${type}`)
       .catch((e) => { if (e.code !== 'ER_DUP_FIELDNAME') throw e; });
   }
+  // Idempotent fallback: some deployments have the table without these columns
+  // (pre‑migration or custom schema). Add any that are still absent.
+  for (const [name, type] of Object.entries(AP_LINK_PAYMENT_COLUMNS)) {
+    if (have.has(name)) continue;
+    // Another company's sync may add it first; only ER_DUP_FIELDNAME is silently
+    // acceptable — all other database errors propagate to the caller.
+    await pool.execute(`ALTER TABLE qbo_ap_links ADD COLUMN ${name} ${type}`)
+      .catch((e) => {
+        if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+      });
+  }
 }
 
 async function syncApLinks(userId, accessToken, realmId, environment) {
@@ -1112,7 +1123,10 @@ async function syncApLinks(userId, accessToken, realmId, environment) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    await conn.execute('DELETE FROM qbo_ap_links WHERE org_id = ?', [String(realmId)]);
+    await conn.execute(
+      'DELETE FROM qbo_ap_links WHERE org_id = ? AND user_id = ?',
+      [String(realmId), userId]
+    );
     for (let i = 0; i < rows.length; i += 500) {
       const chunk = rows.slice(i, i + 500);
       await conn.query(
