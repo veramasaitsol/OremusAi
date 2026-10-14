@@ -981,6 +981,243 @@ async function syncJournals(userId, accessToken, tenantId) {
   return totalJournals;
 }
 
+// ── Sync invoice line items to zb_invoice_line_items ────────────────────────
+// Populates the silver table used by Sales by Product/Service reports,
+// Tax Liability, TDS Summary, GST Returns Workbook, and Forex Gains/Losses.
+// Xero /Invoices returns LineItems with Description, UnitAmount, Quantity,
+// AccountCode, TaxType, TaxAmount — all persisted here for report builders.
+// Idempotent: ON DUPLICATE KEY UPDATE on (user_id, org_id, zoho_line_item_id).
+async function syncInvoiceLineItems(userId, accessToken, tenantId) {
+  const items = await xeroGetAllPages(
+    `${XERO_API_BASE}/Invoices`, xeroHeaders(accessToken, tenantId),
+    { Statuses: 'AUTHORISED,PAID', where: 'Type=="ACCREC"' }, 'Invoices'
+  );
+  if (items.length === 0) return 0;
+
+  const now = new Date();
+  const accountNames = new Map();
+  try {
+    const [accts] = await pool.execute(
+      'SELECT code, name FROM xero_accounts WHERE user_id = ? AND tenant_id = ?',
+      [userId, tenantId]
+    );
+    for (const a of accts) if (a.code) accountNames.set(String(a.code), a.name);
+  } catch (_) { /* fall back to code */ }
+
+  const rows = [];
+  for (const inv of items) {
+    for (const li of (inv.LineItems || [])) {
+      const item = {
+        id: `xero:${inv.InvoiceID}:${li.LineItemID || 0}`,
+        zoho_line_item_id: li.LineItemID || crypto.createHash('md5').update(String(li.Description || '')).digest('hex').slice(0, 16),
+        zoho_invoice_id: `xero:${inv.InvoiceID}`,
+        line_position: li.LineNumber || 0,
+        item_name: li.Description || accountNames.get(String(li.AccountCode)) || String(li.AccountCode) || '',
+        unit: li.UnitName || null,
+        hsn_or_sac: li.TaxType || null,
+        account_id: String(li.AccountCode || ''),
+        account_name: li.AccountName || null,
+        quantity: li.Quantity != null ? parseFloat(li.Quantity) : 1,
+        rate: li.UnitAmount != null ? parseFloat(li.UnitAmount) : null,
+        discount: li.DiscountRate != null ? parseFloat(li.DiscountRate) : 0,
+        discount_amount: li.DiscountAmount != null ? parseFloat(li.DiscountAmount) : 0,
+        item_total: li.LineAmount != null ? parseFloat(li.LineAmount) : null,
+        item_total_inclusive_of_tax: null,
+        tax_id: li.TaxType || null,
+        tax_name: null,
+        tax_type: li.TaxType || null,
+        tax_percentage: li.TaxAmount != null ? (parseFloat(li.TaxAmount) / Math.max(parseFloat(li.LineAmount) || 1, 1) * 100) : null,
+        tax_amount: li.TaxAmount != null ? parseFloat(li.TaxAmount) : 0,
+        custom_fields_json: null,
+      };
+      rows.push([
+        userId, tenantId, item.zoho_line_item_id, item.zoho_invoice_id,
+        item.line_position, item.id,
+        item.item_name, item.description, item.account_id,
+        item.quantity, item.rate, item.item_total, item.tax_amount,
+        item.tax_type,
+      ]);
+    }
+  }
+  if (!rows.length) return 0;
+  await bulkInsert(pool,
+    `INSERT INTO zb_invoice_line_items
+       (user_id, org_id, zoho_line_item_id, zoho_invoice_id, line_position,
+        zoho_item_id, item_name, description, account_id,
+        quantity, rate, item_total, tax_amount, tax_type)
+    VALUES ?
+    ON DUPLICATE KEY UPDATE
+      zoho_invoice_id  = VALUES(zoho_invoice_id),
+      line_position   = VALUES(line_position),
+      zoho_item_id    = VALUES(zoho_item_id),
+      item_name       = VALUES(item_name),
+      description     = VALUES(description),
+      account_id      = VALUES(account_id),
+      quantity        = VALUES(quantity),
+      rate            = VALUES(rate),
+      item_total      = VALUES(item_total),
+      tax_amount      = VALUES(tax_amount),
+      tax_type        = VALUES(tax_type)`,
+    rows
+  );
+  console.log(`[Xero Invoice Lines] Synced ${rows.length} line items for userId=${userId} tenant=${tenantId}`);
+  return rows.length;
+}
+
+// ── Sync vendor payments to zb_vendor_payments ──────────────────────────────
+// Populates the silver table used by AP Aging, Expenses by Vendor,
+// Tax Liability, TDS Summary, GST Returns, Forex Gains/Losses.
+// Xero /Payments (requires accounting.transactions scope) returns Payment
+// objects with Amount, Date, PaymentType, Contact, CurrencyCode, CurrencyRate,
+// and apply-to Invoice/CreditNote details.
+// Scope gated: 401 if connection lacks accounting.transactions scope.
+// Idempotent: ON DUPLICATE KEY UPDATE on (user_id, xero_id).
+async function syncVendorPayments(userId, accessToken, tenantId) {
+  try {
+    const payments = await xeroGetAllPages(
+      `${XERO_API_BASE}/Payments`, xeroHeaders(accessToken, tenantId),
+      {}, 'Payments'
+    );
+    if (payments.length === 0) return 0;
+  } catch (e) {
+    // Scope not granted — gracefully skip; caller will log
+    console.warn('[Xero Vendor Payments] skipped: could not fetch /Payments', e.response?.data || e.message);
+    return 0;
+  }
+
+  const now = new Date();
+  const rows = [];
+  for (const p of payments) {
+    const paymentType = String(p.PaymentType || '').toUpperCase();
+    const amount = parseFloat(p.Amount ?? 0);
+    const payDate = toMysqlDate(p.Date);
+    const payCurrency = p.CurrencyCode || null;
+    const payRate = p.CurrencyRate != null ? parseFloat(p.CurrencyRate) : 1;
+    const contact = p.Contact || {};
+    const vendorName = contact.Name || contact.CompanyName || null;
+    const xeroId = `xero:${p.PaymentID}`;
+    const zohoId = `xero:${p.PaymentID}`;
+
+    // Determine what this payment applies to
+    const applyList = p.ApplyTo || [];
+    let applyInvoiceId = null;
+    let applyInvoiceNumber = null;
+    if (Array.isArray(applyList) && applyList.length) {
+      const first = applyList[0];
+      applyInvoiceId = first.InvoiceID || null;
+      applyInvoiceNumber = first.InvoiceNumber || null;
+    }
+
+    rows.push([
+      userId, tenantId, zohoId, xeroId,
+      vendorName, vendorName,
+      amount, payDate, payCurrency, payRate,
+      paymentType, applyInvoiceId, applyInvoiceNumber,
+      p.Status || 'AUTHORISED', 'xero',
+    ]);
+  }
+  if (!rows.length) return 0;
+  await bulkInsert(pool,
+    `INSERT INTO zb_vendor_payments
+       (user_id, org_id, zoho_id, xero_id, contact_name, company_name,
+        amount, date, currency_code, exchange_rate, payment_type,
+        apply_to_invoice_id, apply_to_invoice_number, status, source_type, synced_at)
+    VALUES ?
+    ON DUPLICATE KEY UPDATE
+      zoho_id       = VALUES(zoho_id),
+      contact_name  = VALUES(contact_name),
+      company_name  = VALUES(company_name),
+      amount        = VALUES(amount),
+      date          = VALUES(date),
+      currency_code = VALUES(currency_code),
+      exchange_rate = VALUES(exchange_rate),
+      payment_type  = VALUES(payment_type),
+      apply_to_invoice_id = VALUES(apply_to_invoice_id),
+      apply_to_invoice_number = VALUES(apply_to_invoice_number),
+      status        = VALUES(status),
+      synced_at     = VALUES(synced_at)`,
+    rows
+  );
+  console.log(`[Xero Vendor Payments] Synced ${rows.length} payments for userId=${userId} tenant=${tenantId}`);
+  return rows.length;
+}
+
+// ── Sync customer payments to zb_customer_payments ──────────────────────────
+// Populates the silver table used by AR Aging, Transaction Detail by Account,
+// Tax Liability, TDS Summary, GST Returns, Forex Gains/Losses.
+// Same structure as vendor payments but for customer-facing payments.
+// Scope gated: 401 if connection lacks accounting.transactions scope.
+// Idempotent: ON DUPLICATE KEY UPDATE on (user_id, xero_id).
+async function syncCustomerPayments(userId, accessToken, tenantId) {
+  try {
+    const payments = await xeroGetAllPages(
+      `${XERO_API_BASE}/Payments`, xeroHeaders(accessToken, tenantId),
+      {}, 'Payments'
+    );
+    if (payments.length === 0) return 0;
+  } catch (e) {
+    // Scope not granted — gracefully skip
+    console.warn('[Xero Customer Payments] skipped: could not fetch /Payments', e.response?.data || e.message);
+    return 0;
+  }
+
+  const now = new Date();
+  const rows = [];
+  for (const p of payments) {
+    const paymentType = String(p.PaymentType || '').toUpperCase();
+    const amount = parseFloat(p.Amount ?? 0);
+    const payDate = toMysqlDate(p.Date);
+    const payCurrency = p.CurrencyCode || null;
+    const payRate = p.CurrencyRate != null ? parseFloat(p.CurrencyRate) : 1;
+    const contact = p.Contact || {};
+    const customerName = contact.Name || contact.CompanyName || null;
+    const xeroId = `xero:${p.PaymentID}`;
+    const zohoId = `xero:${p.PaymentID}`;
+
+    // Determine what this payment applies to
+    const applyList = p.ApplyTo || [];
+    let applyInvoiceId = null;
+    let applyInvoiceNumber = null;
+    if (Array.isArray(applyList) && applyList.length) {
+      const first = applyList[0];
+      applyInvoiceId = first.InvoiceID || null;
+      applyInvoiceNumber = first.InvoiceNumber || null;
+    }
+
+    rows.push([
+      userId, tenantId, zohoId, xeroId,
+      customerName, customerName,
+      amount, payDate, payCurrency, payRate,
+      paymentType, applyInvoiceId, applyInvoiceNumber,
+      p.Status || 'AUTHORISED', 'xero',
+    ]);
+  }
+  if (!rows.length) return 0;
+  await bulkInsert(pool,
+    `INSERT INTO zb_customer_payments
+       (user_id, org_id, zoho_id, xero_id, contact_name, company_name,
+        amount, date, currency_code, exchange_rate, payment_type,
+        apply_to_invoice_id, apply_to_invoice_number, status, source_type, synced_at)
+    VALUES ?
+    ON DUPLICATE KEY UPDATE
+      zoho_id       = VALUES(zoho_id),
+      contact_name  = VALUES(contact_name),
+      company_name  = VALUES(company_name),
+      amount        = VALUES(amount),
+      date          = VALUES(date),
+      currency_code = VALUES(currency_code),
+      exchange_rate = VALUES(exchange_rate),
+      payment_type  = VALUES(payment_type),
+      apply_to_invoice_id = VALUES(apply_to_invoice_id),
+      apply_to_invoice_number = VALUES(apply_to_invoice_number),
+      status        = VALUES(status),
+      synced_at     = VALUES(synced_at)`,
+    rows
+  );
+  console.log(`[Xero Customer Payments] Synced ${rows.length} payments for userId=${userId} tenant=${tenantId}`);
+  return rows.length;
+}
+
 // ── Master sync ─────────────────────────────────────────────────────────────
 async function syncAllXeroData(userId, accessToken, tenantId) {
   console.log(`[Xero Sync] Starting userId=${userId} tenant=${tenantId}`);
@@ -994,6 +1231,7 @@ async function syncAllXeroData(userId, accessToken, tenantId) {
   const steps = [
     syncAccounts, syncCustomers, syncVendors, syncInvoices, syncBills,
     syncExpenses, syncBankTransactions, syncManualJournals,
+    syncInvoiceLineItems, syncVendorPayments, syncCustomerPayments,
   ];
   const results = [];
   for (const step of steps) {
@@ -1046,4 +1284,7 @@ module.exports = {
   syncBankTransactions,
   syncManualJournals,
   syncJournals,
+  syncInvoiceLineItems,
+  syncVendorPayments,
+  syncCustomerPayments,
 };

@@ -19,7 +19,20 @@ ALTER TABLE account_transactions ADD INDEX IF NOT EXISTS idx_at_user_org_plat  (
 ALTER TABLE account_transactions ADD INDEX IF NOT EXISTS idx_at_org_group_date (org_id, account_group, transaction_date);
 ALTER TABLE bank_transactions    ADD INDEX IF NOT EXISTS idx_bt_org_date       (org_id, transaction_date);
 
+-- ── New table indexes ──────────────────────────────────────────────────────
+ALTER TABLE zb_invoice_line_items ADD INDEX IF NOT EXISTS idx_zili_invoice  (`zoho_invoice_id`);
+ALTER TABLE zb_invoice_line_items ADD INDEX IF NOT EXISTS idx_zili_item       (`zoho_item_id`);
+ALTER TABLE zb_vendor_payments ADD INDEX IF NOT EXISTS idx_zvp_org           (`org_id`);
+ALTER TABLE zb_vendor_payments ADD INDEX IF NOT EXISTS idx_zvp_contact         (`contact_name`);
+ALTER TABLE zb_vendor_credits  ADD INDEX IF NOT EXISTS idx_vc_org              (`org_id`);
+ALTER TABLE zb_vendor_credits  ADD INDEX IF NOT EXISTS idx_vc_contact            (`contact_name`);
+ALTER TABLE zb_customer_payments ADD INDEX IF NOT EXISTS idx_cp_org               (`org_id`);
+ALTER TABLE zb_customer_payments ADD INDEX IF NOT EXISTS idx_cp_contact              (`contact_name`);
 -- ── Rollback (manual) ──────────────────────────────────────────────────────
 --   ALTER TABLE account_transactions
 --     DROP INDEX idx_at_org_date, DROP INDEX idx_at_user_org_plat, DROP INDEX idx_at_org_group_date;
 --   ALTER TABLE bank_transactions DROP INDEX idx_bt_org_date;
+--   ALTER TABLE zb_invoice_line_items DROP INDEX idx_zili_invoice, DROP INDEX idx_zili_item;
+--   ALTER TABLE zb_vendor_payments DROP INDEX idx_zvp_org, DROP INDEX idx_zvp_contact;
+--   ALTER TABLE zb_vendor_credits  DROP INDEX idx_vc_org, DROP INDEX idx_vc_contact;
+--   ALTER TABLE zb_customer_payments DROP INDEX idx_cp_org, DROP INDEX idx_cp_contact;

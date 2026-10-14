@@ -286,6 +286,16 @@ CREATE TABLE IF NOT EXISTS bank_transactions (
 ALTER TABLE account_transactions ADD COLUMN IF NOT EXISTS account_group     VARCHAR(50)  NULL AFTER account_name;
 ALTER TABLE account_transactions ADD COLUMN IF NOT EXISTS account_type_code VARCHAR(100) NULL AFTER account_group;
 
+-- ── Add currency and base-amount columns for Xero GL integration ─────────────
+-- currency_code: the transaction's original currency (e.g. AUD, USD, EUR)
+-- exchange_rate: the document's historical exchange rate (Xero CurrencyRate)
+-- base_currency_code: the organization's base currency (e.g. USD)
+-- base_debit/base_credit: already added by base-amount-precision.sql; kept for
+--   reference; writeDoc() stores converted base amounts here.
+ALTER TABLE account_transactions ADD COLUMN IF NOT EXISTS currency_code VARCHAR(10) NULL AFTER base_credit;
+ALTER TABLE account_transactions ADD COLUMN IF NOT EXISTS exchange_rate DECIMAL(10,6) NULL AFTER currency_code;
+ALTER TABLE account_transactions ADD COLUMN IF NOT EXISTS base_currency_code VARCHAR(10) NULL AFTER exchange_rate;
+
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- QuickBooks Online integration (parallel to Zoho)
 -- For idempotent migration on existing DBs, see db/quickbooks-migration.sql
