@@ -4,6 +4,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import Sidebar from '../components/layout/Sidebar.jsx';
 import Navbar from '../components/layout/Navbar.jsx';
 import BackToTop from '../components/common/BackToTop.jsx';
+import SyncStatusBar from '../components/layout/SyncStatusBar.jsx';
 import axiosClient from '../services/axiosClient.js';
 import { setActiveCurrency } from '../features/ui/uiSlice.js';
 import { verifyZohoStatus } from '../features/zoho/zohoSlice.js';
@@ -88,6 +89,7 @@ export default function DashboardLayout() {
       <Sidebar />
       <main className="flex-1 min-w-0 flex flex-col">
         <Navbar title={meta.title} subtitle={meta.subtitle} />
+        <SyncStatusBar />
         <div className="flex-1 animate-fadein">
           <Outlet />
         </div>

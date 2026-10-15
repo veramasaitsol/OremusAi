@@ -262,7 +262,9 @@ router.post('/:id/connect-zoho', async (req, res) => {
 
     // Short-lived JWT for the CLIENT — becomes the OAuth 'state' parameter.
     const clientToken = jwt.sign(
-      { id: rows[0].id, email: rows[0].email, role: rows[0].role, client_id: rows[0].client_id },
+      // connected_by: the admin starting this connect — the sync that follows
+      // reports its progress and outcome to them (services/syncRunService).
+      { id: rows[0].id, email: rows[0].email, role: rows[0].role, client_id: rows[0].client_id, connected_by: req.user.id },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
@@ -337,7 +339,9 @@ router.post('/:id/connect-quickbooks', async (req, res) => {
     if (!rows[0]) return res.status(404).json({ error: 'Client not found' });
 
     const clientToken = jwt.sign(
-      { id: rows[0].id, email: rows[0].email, role: rows[0].role, client_id: rows[0].client_id },
+      // connected_by: the admin starting this connect — the sync that follows
+      // reports its progress and outcome to them (services/syncRunService).
+      { id: rows[0].id, email: rows[0].email, role: rows[0].role, client_id: rows[0].client_id, connected_by: req.user.id },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
@@ -371,7 +375,9 @@ router.post('/:id/connect-xero', async (req, res) => {
     if (!rows[0]) return res.status(404).json({ error: 'Client not found' });
 
     const clientToken = jwt.sign(
-      { id: rows[0].id, email: rows[0].email, role: rows[0].role, client_id: rows[0].client_id },
+      // connected_by: the admin starting this connect — the sync that follows
+      // reports its progress and outcome to them (services/syncRunService).
+      { id: rows[0].id, email: rows[0].email, role: rows[0].role, client_id: rows[0].client_id, connected_by: req.user.id },
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );

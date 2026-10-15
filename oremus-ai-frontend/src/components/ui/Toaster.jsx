@@ -1,19 +1,21 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
+import { CheckCircle2, AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
 import { subscribe, dismissToast } from '../../utils/toastStore.js';
 import { cn } from '../../utils/classNames.js';
 
-const ICONS = { error: AlertCircle, success: CheckCircle2, info: Info };
+const ICONS = { error: AlertCircle, success: CheckCircle2, warning: AlertTriangle, info: Info };
 
 const STYLES = {
   error:   'border-red-200 dark:border-red-800 text-red-700 dark:text-red-300',
   success: 'border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300',
+  warning: 'border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300',
   info:    'border-navy-200 dark:border-navy-700 text-navy-700 dark:text-navy-200',
 };
 
 const ICON_COLORS = {
   error:   'text-red-500',
   success: 'text-emerald-500',
+  warning: 'text-amber-500',
   info:    'text-brand-500',
 };
 
@@ -24,7 +26,9 @@ export default function Toaster() {
   if (!toasts.length) return null;
 
   return (
-    <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 max-w-[360px] w-[calc(100vw-2rem)] sm:w-auto pointer-events-none">
+    // top-16: just below the 56px sticky navbar, so a toast never covers the
+    // account menu or notification bell.
+    <div className="fixed top-16 right-4 z-[100] flex flex-col gap-2 max-w-[360px] w-[calc(100vw-2rem)] sm:w-auto pointer-events-none">
       {toasts.map((t) => {
         const Icon = ICONS[t.type] || Info;
         return (

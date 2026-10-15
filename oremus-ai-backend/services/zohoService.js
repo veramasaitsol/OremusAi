@@ -620,17 +620,22 @@ async function syncBankTransactions(userId, accessToken, orgId, fromDate, toDate
 }
 
 // ── Master sync ────────────────────────────────────────────────────────────────
-async function syncAllZohoData(userId, accessToken, orgId) {
+// Steps a sync run reports per organization (the eight entity syncs below).
+const ZOHO_SYNC_STEPS = 8;
+
+// `run` (optional, see syncRunService) receives each step's progress and outcome.
+async function syncAllZohoData(userId, accessToken, orgId, { run = null } = {}) {
   console.log(`[Zoho Sync] Starting userId=${userId} orgId=${orgId}`);
+  const step = (label, fn) => (run ? run.track(label, fn) : fn());
   const results = await Promise.allSettled([
-    syncCustomers(userId, accessToken, orgId),
-    syncVendors(userId, accessToken, orgId),
-    syncInvoices(userId, accessToken, orgId),
-    syncBills(userId, accessToken, orgId),
-    syncExpenses(userId, accessToken, orgId),
-    syncDayBook(userId, accessToken, orgId),
-    syncAccountTransactions(userId, accessToken, orgId),
-    syncBankTransactions(userId, accessToken, orgId),
+    step('customers', () => syncCustomers(userId, accessToken, orgId)),
+    step('vendors', () => syncVendors(userId, accessToken, orgId)),
+    step('invoices', () => syncInvoices(userId, accessToken, orgId)),
+    step('bills', () => syncBills(userId, accessToken, orgId)),
+    step('expenses', () => syncExpenses(userId, accessToken, orgId)),
+    step('day book', () => syncDayBook(userId, accessToken, orgId)),
+    step('account transactions', () => syncAccountTransactions(userId, accessToken, orgId)),
+    step('bank transactions', () => syncBankTransactions(userId, accessToken, orgId)),
   ]);
   const [cust, vend, inv, bil, exp, day, acct, bank] = results.map((r) =>
     r.status === 'fulfilled' ? r.value : `ERR: ${r.reason?.message}`
@@ -715,4 +720,4 @@ async function getEffectiveZohoUserId(userId) {
   return userId;
 }
 
-module.exports = { syncAllZohoData, syncAccountTransactions, syncBankTransactions, getValidToken, getEffectiveZohoUserId };
+module.exports = { syncAllZohoData, ZOHO_SYNC_STEPS, syncAccountTransactions, syncBankTransactions, getValidToken, getEffectiveZohoUserId };

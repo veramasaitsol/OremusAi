@@ -1145,17 +1145,22 @@ async function syncApLinks(userId, accessToken, realmId, environment) {
   return payments.length;
 }
 
-async function syncAllQBOData(userId, accessToken, realmId, environment) {
+// Steps a sync run reports: eight entity syncs, the general ledger, bill-payment links.
+const QBO_SYNC_STEPS = 10;
+
+// `run` (optional, see syncRunService) receives each step's progress and outcome.
+async function syncAllQBOData(userId, accessToken, realmId, environment, { run = null } = {}) {
   console.log(`[QBO Sync] Starting userId=${userId} realmId=${realmId} env=${environment}`);
+  const step = (label, fn) => (run ? run.track(label, fn) : fn());
   const results = await Promise.allSettled([
-    syncAccounts(userId, accessToken, realmId, environment),
-    syncCustomers(userId, accessToken, realmId, environment),
-    syncVendors(userId, accessToken, realmId, environment),
-    syncInvoices(userId, accessToken, realmId, environment),
-    syncSalesReceipts(userId, accessToken, realmId, environment),
-    syncBills(userId, accessToken, realmId, environment),
-    syncExpenses(userId, accessToken, realmId, environment),
-    syncCustomerPayments(userId, accessToken, realmId, environment),
+    step('chart of accounts', () => syncAccounts(userId, accessToken, realmId, environment)),
+    step('customers', () => syncCustomers(userId, accessToken, realmId, environment)),
+    step('vendors', () => syncVendors(userId, accessToken, realmId, environment)),
+    step('invoices', () => syncInvoices(userId, accessToken, realmId, environment)),
+    step('sales receipts', () => syncSalesReceipts(userId, accessToken, realmId, environment)),
+    step('bills', () => syncBills(userId, accessToken, realmId, environment)),
+    step('expenses', () => syncExpenses(userId, accessToken, realmId, environment)),
+    step('customer payments', () => syncCustomerPayments(userId, accessToken, realmId, environment)),
   ]);
   const [acct, cust, vend, inv, srec, bil, exp, cpay] = results.map((r) =>
     r.status === 'fulfilled' ? r.value : `ERR: ${r.reason?.message}`
@@ -1166,14 +1171,14 @@ async function syncAllQBOData(userId, accessToken, realmId, environment) {
   // DB-backed QB reports (no live QBO Reports call at report time).
   let gl;
   try {
-    gl = await syncGeneralLedger(userId, accessToken, realmId, environment);
+    gl = await step('general ledger', () => syncGeneralLedger(userId, accessToken, realmId, environment));
   } catch (e) {
     gl = `ERR: ${e.message}`;
     console.error('[QBO Sync] general ledger failed:', e.message);
   }
   let links;
   try {
-    links = await syncApLinks(userId, accessToken, realmId, environment);
+    links = await step('bill payments', () => syncApLinks(userId, accessToken, realmId, environment));
   } catch (e) {
     links = `ERR: ${e.message}`;
     console.error('[QBO Sync] A/P application links failed:', e.message);
@@ -1396,6 +1401,7 @@ module.exports = {
   fetchCompanyInfo,
   // Sync
   syncAllQBOData,
+  QBO_SYNC_STEPS,
   syncAccounts,
   syncCustomers,
   syncVendors,

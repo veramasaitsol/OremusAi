@@ -6,7 +6,7 @@ const jwt        = require('jsonwebtoken');
 const axios      = require('axios');
 const pool       = require('../config/db');
 const auth       = require('../middleware/auth');
-const { syncAllZohoData, getValidToken } = require('../services/zohoService');
+const { syncAllZohoData, ZOHO_SYNC_STEPS, getValidToken } = require('../services/zohoService');
 const { syncAllZohoBooksWarehouse, syncAllOrgsForUser } = require('../services/zohoBooksWarehouseService');
 const {
   QBO_AUTH_URL,
@@ -17,7 +17,9 @@ const {
   fetchCompanyInfo: qboFetchCompanyInfo,
   getEffectiveQBUserId,
   syncAllQBOData,
+  QBO_SYNC_STEPS,
 } = require('../services/quickbooksService');
+const { startSyncRun } = require('../services/syncRunService');
 const { ingestForUser } = require('../services/accountingLedgerService');
 const { tableExists } = require('../utils/tableExists');
 
@@ -50,7 +52,13 @@ const {
   getEffectiveXeroUserId,
   getValidXeroToken,
   syncAllXeroData,
+  XERO_SYNC_STEPS,
 } = require('../services/xeroService');
+
+// Who started a sync: the admin connecting on a client's behalf stamps
+// `connected_by` into the client's OAuth state token (routes/clients.js);
+// otherwise the user is connecting their own account.
+const initiatorOf = (decoded) => decoded?.connected_by || decoded?.id || null;
 
 const router = Router();
 
@@ -97,17 +105,25 @@ async function fetchAndStoreZohoOrgs(targetUserId, accessToken) {
   return orgs;
 }
 
-// Fire-and-forget: sync Zoho data + warehouse for a single org.
-function triggerZohoSync(userId, accessToken, orgId, { isFresh = false } = {}) {
-  syncAllZohoData(userId, accessToken, orgId).catch((e) =>
-    console.error('Background sync failed:', e.message)
-  );
-  syncAllZohoBooksWarehouse(userId, accessToken, orgId, {
-    triggerSource: 'oauth',
-    full: isFresh,        // fresh OAuth → priority modules only, clears watermarks
-  }).catch((e) =>
-    console.error('[ZB Warehouse] OAuth-triggered sync failed:', e.message)
-  );
+// Fire-and-forget: sync Zoho data + warehouse for a single org, tracked as one
+// sync run (progress bar + completion notification for `triggeredBy`).
+function triggerZohoSync(userId, accessToken, orgId, { isFresh = false, triggeredBy = null } = {}) {
+  (async () => {
+    const run = await startSyncRun({ userId, triggeredBy, provider: 'zoho', stepsTotal: ZOHO_SYNC_STEPS + 1 });
+    const legacy = syncAllZohoData(userId, accessToken, orgId, { run }).catch((e) =>
+      console.error('Background sync failed:', e.message)
+    );
+    const warehouse = run.track('reports data', () => syncAllZohoBooksWarehouse(userId, accessToken, orgId, {
+      triggerSource: 'oauth',
+      full: isFresh,        // fresh OAuth → priority modules only, clears watermarks
+    })).then((r) => {
+      if (r?.errors?.length) run.warn('reports data', r.errors[r.errors.length - 1]);
+    }).catch((e) =>
+      console.error('[ZB Warehouse] OAuth-triggered sync failed:', e.message)
+    );
+    await Promise.allSettled([legacy, warehouse]);
+    await run.finish();
+  })().catch((e) => console.error('[Zoho sync run] failed:', e.message));
   triggerLedgerIngest(userId, orgId);
 }
 
@@ -115,28 +131,56 @@ function triggerZohoSync(userId, accessToken, orgId, { isFresh = false } = {}) {
 // every one of them (the warehouse + legacy tables are org-scoped) so the user
 // can switch instantly without waiting for data. Runs sequentially in the
 // background to avoid hammering Zoho's rate limits.
-function triggerZohoSyncAllOrgs(userId, accessToken, orgs, { isFresh = false } = {}) {
+function triggerZohoSyncAllOrgs(userId, accessToken, orgs, { isFresh = false, triggeredBy = null } = {}) {
   (async () => {
+    const orgIds = orgs.map((o) => o?.organization_id).filter(Boolean);
+    const run = await startSyncRun({
+      userId, triggeredBy, provider: 'zoho',
+      stepsTotal: 1 + ZOHO_SYNC_STEPS * orgIds.length,
+      orgName: orgIds.length > 1 ? `${orgIds.length} organizations` : (orgs[0]?.name || null),
+    });
     // Warehouse first, across ALL orgs, via the shared rate-limit-aware
     // orchestrator (stops early on Zoho's daily quota and resumes from the
     // watermark on the next cron run) so downstream ledger ingest sees fresh data.
     try {
-      await syncAllOrgsForUser(userId, { triggerSource: 'oauth', full: isFresh });
+      const wh = await run.track('reports data', () => syncAllOrgsForUser(userId, { triggerSource: 'oauth', full: isFresh }));
+      if (wh?.stopped === 'rate_limit') run.warn('reports data', { response: { status: 429 } });
+      for (const c of wh?.completed || []) {
+        if (c.status === 'failed') run.warn('reports data', `organization ${c.orgId} failed to sync`);
+      }
     } catch (e) {
       console.error('[ZB Warehouse] OAuth multi-org sync failed:', e.message);
     }
     // Legacy shared-table sync + ledger ingest per org (non-warehouse paths).
-    for (const o of orgs) {
-      const orgId = o?.organization_id;
-      if (!orgId) continue;
+    for (const orgId of orgIds) {
       try {
-        await syncAllZohoData(userId, accessToken, orgId);
+        await syncAllZohoData(userId, accessToken, orgId, { run });
       } catch (e) {
         console.error(`Background sync failed (org=${orgId}):`, e.message);
       }
       triggerLedgerIngest(userId, orgId);
     }
-  })();
+    await run.finish();
+  })().catch((e) => console.error('[Zoho sync run] failed:', e.message));
+}
+
+// Fire-and-forget QuickBooks sync, tracked as one sync run.
+function triggerQBOSync(userId, accessToken, realmId, environment, { triggeredBy = null } = {}) {
+  (async () => {
+    const [[org]] = await pool.execute(
+      'SELECT company_name FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(realmId)]
+    ).catch(() => [[null]]);
+    const run = await startSyncRun({
+      userId, triggeredBy, provider: 'quickbooks', stepsTotal: QBO_SYNC_STEPS, orgName: org?.company_name || null,
+    });
+    try {
+      await syncAllQBOData(userId, accessToken, String(realmId), environment, { run });
+      await run.finish();
+    } catch (e) {
+      console.error('[QBO Background sync] failed:', e.message);
+      await run.finish(e);
+    }
+  })().catch((e) => console.error('[QBO sync run] failed:', e.message));
 }
 
 // ── GET /api/auth/zoho/start ───────────────────────────────────────────────────
@@ -372,8 +416,8 @@ router.post('/zoho/exchange', auth, async (req, res) => {
       [targetUserId, access_token, refresh_token ?? null, expires_at, organizationId]
     );
 
-    if (orgs.length > 0) triggerZohoSyncAllOrgs(targetUserId, access_token, orgs, { isFresh: true });
-    else if (organizationId) triggerZohoSync(targetUserId, access_token, organizationId, { isFresh: true });
+    if (orgs.length > 0) triggerZohoSyncAllOrgs(targetUserId, access_token, orgs, { isFresh: true, triggeredBy: req.user.id });
+    else if (organizationId) triggerZohoSync(targetUserId, access_token, organizationId, { isFresh: true, triggeredBy: req.user.id });
 
     return res.json({
       success: true,
@@ -412,8 +456,8 @@ router.post('/zoho/save', auth, async (req, res) => {
       [req.user.id, access_token, refresh_token ?? null, expires_at, organizationId]
     );
 
-    if (orgs.length > 0) triggerZohoSyncAllOrgs(req.user.id, access_token, orgs, { isFresh: true });
-    else if (organizationId) triggerZohoSync(req.user.id, access_token, organizationId, { isFresh: true });
+    if (orgs.length > 0) triggerZohoSyncAllOrgs(req.user.id, access_token, orgs, { isFresh: true, triggeredBy: req.user.id });
+    else if (organizationId) triggerZohoSync(req.user.id, access_token, organizationId, { isFresh: true, triggeredBy: req.user.id });
 
     return res.json({
       success: true,
@@ -531,10 +575,12 @@ router.get('/zoho/callback', async (req, res) => {
     const expires_at = Date.now() + (expires_in ?? 3600) * 1000;
 
     let userId = null;
+    let triggeredBy = null;
     if (stateParam) {
       try {
         const decoded = jwt.verify(stateParam, process.env.JWT_SECRET);
         userId = decoded.id;
+        triggeredBy = initiatorOf(decoded);
       } catch {
         return res.redirect(`${process.env.FRONTEND_URL}/auth/zoho/callback?status=error&message=Invalid+state+parameter`);
       }
@@ -561,8 +607,8 @@ router.get('/zoho/callback', async (req, res) => {
       [userId, access_token, refresh_token ?? null, expires_at, organizationId]
     );
 
-    if (orgs.length > 0) triggerZohoSyncAllOrgs(userId, access_token, orgs, { isFresh: true });
-    else if (organizationId) triggerZohoSync(userId, access_token, organizationId, { isFresh: true });
+    if (orgs.length > 0) triggerZohoSyncAllOrgs(userId, access_token, orgs, { isFresh: true, triggeredBy });
+    else if (organizationId) triggerZohoSync(userId, access_token, organizationId, { isFresh: true, triggeredBy });
 
     return res.redirect(
       `${process.env.FRONTEND_URL}/auth/zoho/callback?status=success&organizationId=${encodeURIComponent(organizationId ?? '')}`
@@ -692,7 +738,7 @@ router.post('/zoho/select-org', auth, async (req, res) => {
 
     // Refresh the chosen org in the background (idempotent upserts; no deletes).
     const accessToken = await getValidToken(targetUserId);
-    if (accessToken) triggerZohoSync(targetUserId, accessToken, orgId);
+    if (accessToken) triggerZohoSync(targetUserId, accessToken, orgId, { triggeredBy: req.user.id });
 
     return res.json({ success: true, organizationId: orgId });
   } catch (err) {
@@ -772,10 +818,12 @@ router.get('/quickbooks/callback', async (req, res) => {
 
   // Identify the user from the OAuth 'state' JWT (set in /quickbooks/start).
   let userId = null;
+  let triggeredBy = null;
   if (stateParam) {
     try {
       const decoded = jwt.verify(stateParam, process.env.JWT_SECRET);
       userId = decoded.id;
+      triggeredBy = initiatorOf(decoded);
     } catch {
       return res.redirect(
         `${process.env.FRONTEND_URL}/auth/quickbooks/callback?status=error&message=Invalid+state+parameter`
@@ -832,9 +880,7 @@ router.get('/quickbooks/callback', async (req, res) => {
     );
 
     // Kick off background sync (non-blocking)
-    syncAllQBOData(userId, access_token, String(realmId), environment).catch((e) =>
-      console.error('[QBO Background sync] failed:', e.message)
-    );
+    triggerQBOSync(userId, access_token, realmId, environment, { triggeredBy });
     triggerLedgerIngest(userId);
 
     return res.redirect(
@@ -903,9 +949,7 @@ router.post('/quickbooks/exchange', auth, async (req, res) => {
       ]
     );
 
-    syncAllQBOData(targetUserId, access_token, String(realmId), environment).catch((e) =>
-      console.error('[QBO Background sync] failed:', e.message)
-    );
+    triggerQBOSync(targetUserId, access_token, realmId, environment, { triggeredBy: req.user.id });
     triggerLedgerIngest(targetUserId);
 
     return res.json({ success: true, realmId: String(realmId), environment, expires_at });
@@ -942,9 +986,7 @@ router.post('/quickbooks/save', auth, async (req, res) => {
     );
     await markQBORealmActive(req.user.id, realm_id);
 
-    syncAllQBOData(req.user.id, access_token, String(realm_id), environment).catch((e) =>
-      console.error('[QBO Background sync] failed:', e.message)
-    );
+    triggerQBOSync(req.user.id, access_token, realm_id, environment, { triggeredBy: req.user.id });
     triggerLedgerIngest(req.user.id);
 
     return res.json({ success: true, realmId: String(realm_id), environment });
@@ -1174,18 +1216,25 @@ async function fetchAndStoreXeroTenants(targetUserId, accessToken) {
 }
 
 // Fire-and-forget: sync every connected Xero tenant sequentially (rate-limit
-// friendly) after an OAuth connect.
-function triggerXeroSyncAllTenants(userId, accessToken, orgs) {
+// friendly) after an OAuth connect, tracked as one sync run.
+function triggerXeroSyncAllTenants(userId, accessToken, orgs, { triggeredBy = null } = {}) {
   (async () => {
-    for (const t of orgs) {
-      if (!t?.tenantId) continue;
+    const tenants = orgs.filter((t) => t?.tenantId);
+    const run = await startSyncRun({
+      userId, triggeredBy, provider: 'xero',
+      stepsTotal: XERO_SYNC_STEPS * tenants.length,
+      orgName: tenants.length > 1 ? `${tenants.length} organisations` : (tenants[0]?.tenantName || null),
+    });
+    for (const t of tenants) {
       try {
-        await syncAllXeroData(userId, accessToken, t.tenantId);
+        await syncAllXeroData(userId, accessToken, t.tenantId, { run });
       } catch (e) {
         console.error(`[Xero Background sync] failed (tenant=${t.tenantId}):`, e.message);
+        run.warn(t.tenantName || 'organisation', e);
       }
     }
-  })();
+    await run.finish();
+  })().catch((e) => console.error('[Xero sync run] failed:', e.message));
 }
 
 // ── GET /api/auth/xero/start ──────────────────────────────────────────────────
@@ -1221,10 +1270,12 @@ router.get('/xero/callback', async (req, res) => {
   }
 
   let userId = null;
+  let triggeredBy = null;
   if (stateParam) {
     try {
       const decoded = jwt.verify(stateParam, process.env.JWT_SECRET);
       userId = decoded.id;
+      triggeredBy = initiatorOf(decoded);
     } catch {
       return res.redirect(`${process.env.FRONTEND_URL}/auth/xero/callback?status=error&message=Invalid+state+parameter`);
     }
@@ -1267,7 +1318,7 @@ router.get('/xero/callback', async (req, res) => {
       [userId, access_token, refresh_token ?? null, expires_at, tenantId, tenantName]
     );
 
-    triggerXeroSyncAllTenants(userId, access_token, orgs);
+    triggerXeroSyncAllTenants(userId, access_token, orgs, { triggeredBy });
 
     return res.redirect(
       `${process.env.FRONTEND_URL}/auth/xero/callback?status=success&tenantId=${encodeURIComponent(tenantId)}`
@@ -1319,7 +1370,7 @@ router.post('/xero/exchange', auth, async (req, res) => {
       [targetUserId, access_token, refresh_token ?? null, expires_at, active.tenantId, active.tenantName || null]
     );
 
-    triggerXeroSyncAllTenants(targetUserId, access_token, orgs);
+    triggerXeroSyncAllTenants(targetUserId, access_token, orgs, { triggeredBy: req.user.id });
 
     return res.json({
       success: true,
@@ -1483,9 +1534,8 @@ router.post('/xero/select-org', auth, async (req, res) => {
     try {
       const tok = await getValidXeroToken(targetUserId, String(tenantId));
       if (tok?.accessToken) {
-        syncAllXeroData(targetUserId, tok.accessToken, String(tenantId)).catch((e) =>
-          console.error('[Xero select-org] background sync failed:', e.message)
-        );
+        triggerXeroSyncAllTenants(targetUserId, tok.accessToken,
+          [{ tenantId: String(tenantId), tenantName: owned.name || null }], { triggeredBy: req.user.id });
       }
     } catch (e) { console.warn('[Xero select-org] token unavailable for sync:', e.message); }
 

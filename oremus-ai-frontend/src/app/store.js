@@ -12,6 +12,7 @@ import orgsReducer from '../features/orgs/orgsSlice.js';
 import notificationsReducer from '../features/notifications/notificationsSlice.js';
 import viewAsReducer from '../features/viewAs/viewAsSlice.js';
 import settingsReducer from '../features/settings/settingsSlice.js';
+import syncRunsReducer from '../features/sync/syncRunsSlice.js';
 import { setActiveCurrency } from '../utils/fmt.js';
 
 export const store = configureStore({
@@ -29,6 +30,7 @@ export const store = configureStore({
     notifications: notificationsReducer,
     viewAs: viewAsReducer,
     settings: settingsReducer,
+    syncRuns: syncRunsReducer,
   },
 });
 

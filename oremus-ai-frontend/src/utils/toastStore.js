@@ -32,5 +32,6 @@ export function addToast(message, type = 'info', duration = 4500) {
 export const toast = {
   error:   (m, d) => addToast(m, 'error', d),
   success: (m, d) => addToast(m, 'success', d),
+  warning: (m, d) => addToast(m, 'warning', d),
   info:    (m, d) => addToast(m, 'info', d),
 };

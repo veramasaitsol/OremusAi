@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import axiosClient from '../services/axiosClient.js';
+import { expectSyncRun } from '../features/sync/syncRunsSlice.js';
 import {
   connectZoho,
   markZohoConnected,
@@ -41,6 +42,9 @@ export default function ZohoCallback() {
     if (statusParam === 'success') {
       if (handled.current) return;
       handled.current = true;
+      // The server has just started syncing this connection — the global
+      // progress bar picks it up on the next page.
+      expectSyncRun();
 
       if (connectingForClient) {
         // Admin connected Zoho on behalf of a client — don't update admin's own state
@@ -65,6 +69,7 @@ export default function ZohoCallback() {
       isClientRef.current = true;
       dispatch(connectZoho({ code, state: clientState || stateParam }))
         .unwrap()
+        .then(() => expectSyncRun())
         .finally(() => {
           sessionStorage.removeItem('oremus_connect_for_client');
           sessionStorage.removeItem('oremus_client_connect_token');
@@ -74,7 +79,7 @@ export default function ZohoCallback() {
     }
 
     // Normal self-connect
-    dispatch(connectZoho({ code, state: stateParam }));
+    dispatch(connectZoho({ code, state: stateParam })).unwrap().then(() => expectSyncRun()).catch(() => {});
   }, [code, statusParam, orgId, oauthError, dispatch, stateParam, navigate]);
 
   // Redirect to settings after a successful self-connect.

@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { expectSyncRun } from '../features/sync/syncRunsSlice.js';
 import { useDispatch, useSelector } from 'react-redux';
 import { Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import {
@@ -25,6 +26,9 @@ export default function QuickBooksCallback() {
     if (statusParam === 'error' || oauthError) return;
 
     if (statusParam === 'success') {
+      // The server has just started syncing this connection — the global
+      // progress bar picks it up on the next page.
+      expectSyncRun();
       const connectingForClient = sessionStorage.getItem('oremus_connect_for_client');
       if (connectingForClient) {
         // Admin-for-client flow — don't update admin's own state, just route back.

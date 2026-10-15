@@ -1,94 +1,47 @@
-import { useEffect, useState } from 'react';
-import { Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
-import axiosClient from '../services/axiosClient.js';
+import { useSelector } from 'react-redux';
+import { Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
+import { selectSyncRunForClient } from '../features/sync/syncRunsSlice.js';
 import { cn } from '../utils/classNames.js';
 
-// Live background-sync tracker for a single client account. Polls the backend
-// /api/sync/progress endpoint (scoped to the client via X-Client-Id) and renders
-// a compact percentage bar while data is still syncing — or a green "Synced"
-// once nothing is pending. Polling only continues while a sync is running, so
-// an idle page makes exactly one request.
+// Per-client sync status on the Clients list: a small percentage bar while
+// that client's data is syncing, then the outcome of the latest sync for a few
+// minutes (hover a failure for the reason). Reads the runs the global
+// SyncStatusBar already polls — no requests of its own.
 export default function SyncProgress({ clientId }) {
-  const [state, setState] = useState({
-    loading: true,
-    syncing: false,
-    percent: 100,
-    pending: 0,
-    connected: false,
-    error: false,
-  });
+  const run = useSelector(selectSyncRunForClient(clientId));
+  if (!run) return null;
 
-  useEffect(() => {
-    let cancelled = false;
-    let timer = null;
-
-    const load = async () => {
-      try {
-        const { data } = await axiosClient.get('/sync/progress', {
-          headers: { 'X-Client-Id': clientId },
-        });
-        if (cancelled) return;
-        const connected = Object.values(data.platforms || {}).find((p) => p && p.connected);
-        setState({
-          loading: false,
-          syncing: !!data.syncing,
-          percent: connected ? connected.percent : 100,
-          pending: connected ? connected.pending : 0,
-          connected: !!connected,
-          error: false,
-        });
-        // Keep polling while any platform is mid-sync; otherwise stop.
-        clearTimeout(timer);
-        if (data.syncing) timer = setTimeout(load, 4000);
-      } catch {
-        if (!cancelled) setState((s) => ({ ...s, loading: false, error: true }));
-      }
-    };
-
-    load();
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [clientId]);
-
-  if (state.loading) return <span className="block h-5" aria-hidden="true" />;
-  if (state.error || !state.connected) return null;
-
-  // Fully synced + idle → a quiet green check, no bar.
-  if (!state.syncing && state.pending <= 0) {
+  if (run.status === 'running') {
     return (
-      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-        {/* <CheckCircle2 size={11} /> Synced */}
-      </span>
+      <div className="w-full max-w-[170px]" title={run.stage ? `Fetching ${run.stage}` : 'Starting…'}>
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-brand-600 dark:text-brand-400">
+          <Loader2 size={11} className="animate-spin shrink-0" />
+          <span className="truncate">Syncing… {run.percent}%</span>
+        </div>
+        <div className="mt-1 h-1 rounded-full bg-navy-100 dark:bg-navy-800 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-brand-500 to-cyan-500 transition-[width] duration-700"
+            style={{ width: `${Math.max(3, run.percent)}%` }}
+          />
+        </div>
+      </div>
     );
   }
 
-  const pct = Math.max(0, Math.min(100, Math.round(state.percent)));
-  const pending = Math.max(0, Math.min(100, Math.round(state.pending)));
+  const outcome = {
+    succeeded: { Icon: CheckCircle2,  text: 'Synced',             cls: 'text-emerald-600 dark:text-emerald-400' },
+    partial:   { Icon: AlertTriangle, text: 'Synced with issues', cls: 'text-amber-600 dark:text-amber-400' },
+    failed:    { Icon: XCircle,       text: 'Sync failed',        cls: 'text-red-600 dark:text-red-400' },
+  }[run.status];
+  if (!outcome) return null;
+  const { Icon, text, cls } = outcome;
+
   return (
-    <div className="w-full max-w-[170px]">
-      {/* <div className="flex items-center gap-1.5 text-[11px] font-semibold">
-        {state.syncing ? (
-          <Loader2 size={11} className="animate-spin text-brand-500 shrink-0" />
-        ) : (
-          <AlertTriangle size={11} className="text-amber-500 shrink-0" />
-        )}
-        <span className={cn(
-          'truncate',
-          state.syncing
-            ? 'text-brand-600 dark:text-brand-400'
-            : 'text-amber-600 dark:text-amber-400'
-        )}>
-          {state.syncing ? `Syncing… ${pct}%` : `Sync pending · ${pending}%`}
-        </span>
-      </div>
-      <div className="mt-1 h-1 rounded-full bg-navy-100 dark:bg-navy-800 overflow-hidden">
-        <div
-          className={cn(
-            'h-full rounded-full transition-all duration-500',
-            state.syncing ? 'bg-gradient-to-r from-brand-500 to-cyan-500' : 'bg-amber-400'
-          )}
-          style={{ width: `${Math.max(2, pct)}%` }}
-        />
-      </div> */}
-    </div>
+    <span
+      className={cn('inline-flex items-center gap-1 text-[11px] font-medium', cls, run.error && 'cursor-help')}
+      title={run.error || undefined}
+    >
+      <Icon size={11} className="shrink-0" /> {text}
+    </span>
   );
 }

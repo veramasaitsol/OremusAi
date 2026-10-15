@@ -26,6 +26,7 @@ import {
   clearXeroError,
 } from '../features/xero/xeroSlice.js';
 import { getXeroStartURL, getXeroReauthorizeURL } from '../features/xero/xeroAPI.js';
+import { expectSyncRun } from '../features/sync/syncRunsSlice.js';
 import axiosClient from '../services/axiosClient.js';
 
 // ── Section wrapper ──────────────────────────────────────────────────────────
@@ -207,6 +208,7 @@ function ZohoConnectCard() {
     setWarehouseMsg('');
     try {
       await axiosClient.post('/sync/all');
+      expectSyncRun();
       setWarehouseMsg('Sync started in background');
     } catch (e) {
       setWarehouseMsg(e.response?.data?.error || 'Sync failed');
@@ -746,7 +748,8 @@ function ProviderSyncRow({ provider }) {
     setMsg('');
     try {
       await axiosClient.post(endpoint);
-      setMsg('Sync started — your data will refresh in a few moments.');
+      expectSyncRun();
+      setMsg('Sync started — progress is shown at the top of the page.');
     } catch {
       setMsg('Sync failed — please contact your admin if this keeps happening.');
     } finally {

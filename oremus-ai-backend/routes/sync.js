@@ -3,9 +3,11 @@ const { Router } = require('express');
 const axios      = require('axios');
 const auth       = require('../middleware/auth');
 const pool       = require('../config/db');
-const { syncAllZohoData, syncAccountTransactions, syncBankTransactions, getValidToken, getEffectiveZohoUserId } = require('../services/zohoService');
+const { syncAllZohoData, ZOHO_SYNC_STEPS, syncAccountTransactions, syncBankTransactions, getValidToken, getEffectiveZohoUserId } = require('../services/zohoService');
+const { startSyncRun, listRecentRuns } = require('../services/syncRunService');
 const {
   syncAllQBOData,
+  QBO_SYNC_STEPS,
   syncAccounts:      qboSyncAccounts,
   syncCustomers:     qboSyncCustomers,
   syncVendors:       qboSyncVendors,
@@ -17,6 +19,7 @@ const {
 } = require('../services/quickbooksService');
 const {
   syncAllXeroData,
+  XERO_SYNC_STEPS,
   syncAccounts:        xeroSyncAccounts,
   syncCustomers:       xeroSyncCustomers,
   syncVendors:         xeroSyncVendors,
@@ -63,6 +66,20 @@ function handleFetchError(err, res, label) {
 const router = Router();
 router.use(auth);
 
+// GET /api/sync/runs
+// Background syncs the caller started (an admin connecting a client) or that
+// sync the caller's own data: every running one with its progress, plus those
+// that finished in the last few minutes with their outcome. Polled by the
+// global sync progress bar.
+router.get('/runs', async (req, res) => {
+  try {
+    return res.json({ runs: await listRecentRuns(req.user.id) });
+  } catch (err) {
+    console.error('[Sync/runs] error:', err.message);
+    return res.status(500).json({ error: 'Could not load sync status' });
+  }
+});
+
 async function getTokenAndOrg(userId) {
   const accessToken = await getValidToken(userId);
   if (!accessToken) throw new Error('Zoho not connected');
@@ -87,14 +104,18 @@ router.post('/all', async (req, res) => {
     );
     if (!orgs.length) throw new Error('No Zoho organizations found');
     (async () => {
+      const run = await startSyncRun({
+        userId, triggeredBy: req.user.id, provider: 'zoho', stepsTotal: ZOHO_SYNC_STEPS * orgs.length,
+      });
       for (const { org_id: orgId } of orgs) {
         try {
-          await syncAllZohoData(userId, accessToken, orgId);
+          await syncAllZohoData(userId, accessToken, orgId, { run });
         } catch (e) {
           console.error(`[Sync/all org=${orgId}] error:`, e.message);
         }
       }
-    })();
+      await run.finish();
+    })().catch((e) => console.error('[Sync/all] run failed:', e.message));
     return res.json({ message: `Full sync started in background (${orgs.length} organization(s))` });
   } catch (err) {
     return res.status(400).json({ error: err.message });
@@ -476,9 +497,16 @@ async function getQBOAuth(userId) {
 router.post('/qbo/all', async (req, res) => {
   try {
     const { accessToken, realmId, environment } = await getQBOAuth(req.user.id);
-    syncAllQBOData(req.user.id, accessToken, realmId, environment).catch((e) =>
-      console.error('[QBO Sync/all] error:', e.message)
-    );
+    (async () => {
+      const run = await startSyncRun({ userId: req.user.id, provider: 'quickbooks', stepsTotal: QBO_SYNC_STEPS });
+      try {
+        await syncAllQBOData(req.user.id, accessToken, realmId, environment, { run });
+        await run.finish();
+      } catch (e) {
+        console.error('[QBO Sync/all] error:', e.message);
+        await run.finish(e);
+      }
+    })().catch((e) => console.error('[QBO Sync/all] run failed:', e.message));
     return res.json({ message: 'Full QuickBooks sync started in background' });
   } catch (err) {
     return res.status(400).json({ error: err.message });
@@ -520,9 +548,16 @@ async function getXeroAuth(userId) {
 router.post('/xero/all', async (req, res) => {
   try {
     const { accessToken, tenantId } = await getXeroAuth(req.user.id);
-    syncAllXeroData(req.user.id, accessToken, tenantId).catch((e) =>
-      console.error('[Xero Sync/all] error:', e.message)
-    );
+    (async () => {
+      const run = await startSyncRun({ userId: req.user.id, provider: 'xero', stepsTotal: XERO_SYNC_STEPS });
+      try {
+        await syncAllXeroData(req.user.id, accessToken, tenantId, { run });
+        await run.finish();
+      } catch (e) {
+        console.error('[Xero Sync/all] error:', e.message);
+        await run.finish(e);
+      }
+    })().catch((e) => console.error('[Xero Sync/all] run failed:', e.message));
     return res.json({ message: 'Full Xero sync started in background' });
   } catch (err) {
     return res.status(400).json({ error: err.message });

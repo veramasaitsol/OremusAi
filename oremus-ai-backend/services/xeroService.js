@@ -1024,7 +1024,22 @@ async function syncJournals(userId, accessToken, tenantId) {
 }
 
 // ── Master sync ─────────────────────────────────────────────────────────────
-async function syncAllXeroData(userId, accessToken, tenantId) {
+// Steps a sync run reports for one tenant: the eight entity syncs + the ledger.
+const XERO_SYNC_STEPS = 9;
+const XERO_STEP_LABELS = new Map([
+  [syncAccounts, 'chart of accounts'], [syncCustomers, 'customers'], [syncVendors, 'vendors'],
+  [syncInvoices, 'invoices'], [syncBills, 'bills'], [syncExpenses, 'expenses'],
+  [syncBankTransactions, 'bank transactions'], [syncManualJournals, 'manual journals'],
+]);
+// Ledger-rebuild fetch keys → what the admin reads in a warning.
+const XERO_LEDGER_ENTITY_LABEL = {
+  invoices: 'invoices', creditnotes: 'credit notes', banktransactions: 'bank transactions',
+  manualjournals: 'manual journals', banktransfers: 'bank transfers', payments: 'payments',
+  prepayments: 'prepayments', overpayments: 'overpayments',
+};
+
+// `run` (optional, see syncRunService) receives each step's progress and outcome.
+async function syncAllXeroData(userId, accessToken, tenantId, { run = null } = {}) {
   console.log(`[Xero Sync] Starting userId=${userId} tenant=${tenantId}`);
   // One entity at a time: Xero allows 5 concurrent calls per org, and firing
   // all eight in parallel tripped 429s that silently dropped whole entities
@@ -1039,10 +1054,14 @@ async function syncAllXeroData(userId, accessToken, tenantId) {
   ];
   const results = [];
   for (const step of steps) {
+    const label = XERO_STEP_LABELS.get(step);
+    run?.begin(label);
     try {
       results.push({ status: 'fulfilled', value: await step(userId, accessToken, tenantId) });
+      run?.done(label);
     } catch (reason) {
       results.push({ status: 'rejected', reason });
+      run?.fail(label, reason);
     }
   }
   const [acct, cust, vend, inv, bil, exp, bank, jrn] = results.map((r) =>
@@ -1057,12 +1076,20 @@ async function syncAllXeroData(userId, accessToken, tenantId) {
   // Runs AFTER the silver-table sync (it reads the freshly synced xero_accounts)
   // and is lazy-required to avoid a circular module dependency. Isolated so a
   // rebuild failure never fails the sync.
+  run?.begin('general ledger');
   try {
     const { rebuildXeroLedger } = require('./xeroPostingEngine');
     const led = await rebuildXeroLedger(userId, {});
     console.log(`[Xero Sync] Ledger rebuilt — promoted ${led.promoted} lines to account_transactions`);
+    // The rebuild carries on past an endpoint it couldn't read (e.g. /Payments
+    // without the payments scope) — still worth telling whoever ran the sync.
+    for (const [key, reason] of Object.entries(led.stats?._errors || {})) {
+      run?.warn(XERO_LEDGER_ENTITY_LABEL[key] || key, reason);
+    }
+    run?.done('general ledger');
   } catch (e) {
     console.error('[Xero Sync] Ledger rebuild failed:', e.message);
+    run?.fail('general ledger', e);
   }
 }
 
@@ -1079,6 +1106,7 @@ module.exports = {
   getValidXeroToken,
   getEffectiveXeroUserId,
   syncAllXeroData,
+  XERO_SYNC_STEPS,
   syncAccounts,
   syncCustomers,
   syncVendors,
