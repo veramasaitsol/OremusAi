@@ -58,7 +58,7 @@ const ALLOWED_ORIGINS = [
   'https://www.daybook.vensframe.com',
   'https://oremusai.veramasa.com',
   'https://oremusui.vensframe.com',
-  'http://122.175.56.137:8000/api/v1/query',
+  'https://aiapi.oremuscorp.ai/api/v1/query',
   'http://122.175.56.137:8000',
   'https://122.175.56.137:8000/api/v1/query',
   'https://122.175.56.137:8000',
