@@ -503,14 +503,40 @@ async function syncVendors(userId, accessToken, tenantId) {
   return contacts.length;
 }
 
+// A document Xero voids or deletes AFTER we first synced it disappears from an
+// AUTHORISED,PAID fetch, so our copy used to stay 'open' at its old balance for
+// ever (a voided ₹8.7L bill kept showing on A/P Aging). VOIDED/DELETED are now
+// fetched too, but only to UPDATE rows we already hold — status + balance 0 —
+// never to insert a document that was voided before we ever saw it (reports
+// and dashboards that don't filter on status must not start counting it).
+const XERO_LIVE_DOC_STATUSES = new Set(['AUTHORISED', 'PAID']);
+const XERO_GONE_DOC_STATUS = { VOIDED: 'voided', DELETED: 'deleted' };
+async function markXeroDocsGone(conn, table, userId, tenantId, docs) {
+  let marked = 0;
+  for (const [xeroStatus, status] of Object.entries(XERO_GONE_DOC_STATUS)) {
+    const ids = docs.filter((d) => String(d.Status).toUpperCase() === xeroStatus && d.InvoiceID).map((d) => d.InvoiceID);
+    for (let i = 0; i < ids.length; i += 500) {
+      const [res] = await conn.query(
+        `UPDATE ${table} SET status = ?, balance = 0, synced_at = NOW()
+          WHERE user_id = ? AND org_id = ? AND xero_id IN (?)`,
+        [status, userId, tenantId, ids.slice(i, i + 500)]
+      );
+      marked += res.affectedRows;
+    }
+  }
+  return marked;
+}
+
 // ── Sync invoices (Type=ACCREC) ──────────────────────────────────────────────
 async function syncInvoices(userId, accessToken, tenantId) {
   await ensureDocNumberLength();
-  const items = await xeroGetAllPages(
+  const fetched = await xeroGetAllPages(
     `${XERO_API_BASE}/Invoices`, xeroHeaders(accessToken, tenantId),
-    { Statuses: 'AUTHORISED,PAID', where: 'Type=="ACCREC"' }, 'Invoices'
+    { Statuses: 'AUTHORISED,PAID,VOIDED,DELETED', where: 'Type=="ACCREC"' }, 'Invoices'
   );
-  if (items.length === 0) return 0;
+  const items = fetched.filter((d) => XERO_LIVE_DOC_STATUSES.has(String(d.Status).toUpperCase()));
+  const gone = fetched.filter((d) => !XERO_LIVE_DOC_STATUSES.has(String(d.Status).toUpperCase()));
+  if (items.length === 0 && gone.length === 0) return 0;
 
   const now = new Date();
   // Xero's Invoice entity always carries CurrencyCode (defaults to the org's
@@ -557,6 +583,7 @@ async function syncInvoices(userId, accessToken, tenantId) {
          synced_at        = VALUES(synced_at)`,
       rows
     );
+    if (gone.length) await markXeroDocsGone(conn, 'invoices', userId, tenantId, gone);
   } finally {
     conn.release();
   }
@@ -668,47 +695,62 @@ async function ensureDocNumberLength() {
 // ── Sync bills (Type=ACCPAY) ─────────────────────────────────────────────────
 async function syncBills(userId, accessToken, tenantId) {
   await ensureDocNumberLength();
-  const items = await xeroGetAllPages(
+  const fetched = await xeroGetAllPages(
     `${XERO_API_BASE}/Invoices`, xeroHeaders(accessToken, tenantId),
-    { Statuses: 'AUTHORISED,PAID', where: 'Type=="ACCPAY"' }, 'Invoices'
+    { Statuses: 'AUTHORISED,PAID,VOIDED,DELETED', where: 'Type=="ACCPAY"' }, 'Invoices'
   );
-  if (items.length === 0) return 0;
+  const items = fetched.filter((d) => XERO_LIVE_DOC_STATUSES.has(String(d.Status).toUpperCase()));
+  const gone = fetched.filter((d) => !XERO_LIVE_DOC_STATUSES.has(String(d.Status).toUpperCase()));
+  if (items.length === 0 && gone.length === 0) return 0;
 
   const now = new Date();
-  const rows = items.map((b) => [
-    userId, tenantId, `xero:${b.InvoiceID}`, b.InvoiceID,
-    docNumber(b.InvoiceNumber),
-    b.Contact?.Name || null,
-    toMysqlDate(b.Date),
-    toMysqlDate(b.DueDate),
-    parseFloat(b.Total ?? 0),
-    parseFloat(b.AmountDue ?? 0),
-    b.Status === 'PAID' ? 'paid' : 'open',
-    now,
-  ]);
+  // Same currency fields as syncInvoices: Total/AmountDue are in the bill's own
+  // currency, so without CurrencyCode/CurrencyRate a foreign bill (an AED
+  // supplier invoice in an INR org) read as base currency in every report.
+  const rows = items.map((b) => {
+    const code = b.CurrencyCode || null;
+    return [
+      userId, tenantId, `xero:${b.InvoiceID}`, b.InvoiceID,
+      docNumber(b.InvoiceNumber),
+      b.Contact?.Name || null,
+      toMysqlDate(b.Date),
+      toMysqlDate(b.DueDate),
+      parseFloat(b.Total ?? 0),
+      parseFloat(b.AmountDue ?? 0),
+      b.Status === 'PAID' ? 'paid' : 'open',
+      code, currencySymbol(code),
+      b.CurrencyRate != null ? parseFloat(b.CurrencyRate) : null,
+      now,
+    ];
+  });
 
   const conn = await pool.getConnection();
   try {
     await bulkInsert(conn,
       `INSERT INTO bills
          (user_id, org_id, zoho_id, xero_id, bill_number, vendor_name,
-          date, due_date, total, balance, status, synced_at)
+          date, due_date, total, balance, status,
+          currency_code, currency_symbol, exchange_rate, synced_at)
        VALUES ?
        ON DUPLICATE KEY UPDATE
-         xero_id     = VALUES(xero_id),
-         bill_number = VALUES(bill_number),
-         vendor_name = VALUES(vendor_name),
-         date        = VALUES(date),
-         due_date    = VALUES(due_date),
-         total       = VALUES(total),
-         balance     = VALUES(balance),
-         status      = VALUES(status),
-         synced_at   = VALUES(synced_at)`,
+         xero_id         = VALUES(xero_id),
+         bill_number     = VALUES(bill_number),
+         vendor_name     = VALUES(vendor_name),
+         date            = VALUES(date),
+         due_date        = VALUES(due_date),
+         total           = VALUES(total),
+         balance         = VALUES(balance),
+         status          = VALUES(status),
+         currency_code   = VALUES(currency_code),
+         currency_symbol = VALUES(currency_symbol),
+         exchange_rate   = VALUES(exchange_rate),
+         synced_at       = VALUES(synced_at)`,
       rows
     );
     if (await tableExists('zb_bill_line_items')) {
       await syncBillLineItems(conn, userId, tenantId, items);
     }
+    if (gone.length) await markXeroDocsGone(conn, 'bills', userId, tenantId, gone);
   } finally {
     conn.release();
   }

@@ -15,6 +15,8 @@ const pool = require('../config/db');
 // The A/P Aging Summary ages into the same nine buckets as the A/R Aging
 // Summary — one shared definition keeps the two reports column-identical.
 const { AGING_BUCKETS, agingBucketFor } = require('./salesArFromInvoicesService');
+const { invoiceFxContext, convertInvoicesToBase } = require('./invoiceFx');
+const { attachXeroAsOfBalances, xeroOpenCredits, existedOn, NOT_SYNTHETIC_XERO_SQL } = require('./xeroAsOfBalances');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute(
@@ -117,8 +119,8 @@ async function buildApAgingDetail(userId, params = {}) {
   // statuses excluded across all three providers (Zoho draft/void, Xero
   // DRAFT/SUBMITTED/VOIDED/DELETED).
   const [bills] = await pool.execute(
-    `SELECT qbo_id, bill_number, vendor_name, date, due_date,
-            total, balance, currency_code
+    `SELECT qbo_id, xero_id, bill_number, vendor_name, date, due_date,
+            total, balance, currency_code, exchange_rate
        FROM bills
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'submitted', 'void', 'voided', 'deleted')`,
@@ -126,6 +128,7 @@ async function buildApAgingDetail(userId, params = {}) {
   );
 
   await attachAsOfBillBalances(bills, userId, orgId, asOf);
+  await convertXeroBillsToBase(bills, orgId);
 
   const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
 
@@ -148,8 +151,9 @@ async function buildApAgingDetail(userId, params = {}) {
   };
 
   for (const bill of bills) {
-    // Point-in-time: a bill entered after the as-of date didn't exist yet.
-    if (bill.date && new Date(bill.date) > asOf) continue;
+    // Point-in-time: a bill entered after the as-of date didn't exist yet —
+    // unless it was paid before it was issued (see existedOn).
+    if (!existedOn(bill, asOf)) continue;
     // Settled on/before the as-of date (per the ledger reconstruction) — not
     // outstanding, so it doesn't belong in a historical aging snapshot.
     if (num(bill._balanceAsOf) === 0) continue;
@@ -277,6 +281,14 @@ async function fetchUnallocatedVendorCredits(userId, orgId, asOf) {
   // End-of-day literal built from the same calendar date daysBetween() ages by,
   // so the cut-off can't slip a day through a timezone conversion.
   const cutoff = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} 23:59:59`;
+
+  // Xero with synced allocations: every credit note / overpayment is listed
+  // exactly — its total less what was allocated or refunded by the as-of date
+  // — under its own contact and number, instead of inferring the leftover from
+  // the vendor's net ledger balance (which nets an open credit against an open
+  // bill of the same vendor and can't see allocation dates).
+  const xeroCredits = await xeroOpenCredits(userId, orgId, asOf, 'ap');
+  if (xeroCredits) return xeroCredits.map(({ customer, ...c }) => ({ vendor: customer, ...c }));
   const [lines] = await pool.execute(
     `SELECT transaction_details AS vendor, source_id, source_type,
             MIN(transaction_date) AS doc_date,
@@ -285,7 +297,7 @@ async function fetchUnallocatedVendorCredits(userId, orgId, asOf) {
       WHERE user_id = ? AND org_id = ?
         AND account_type_code = 'accounts_payable'
         AND transaction_date <= ?
-        AND transaction_id NOT LIKE 'xero-recon:%'
+        AND ${NOT_SYNTHETIC_XERO_SQL}
       GROUP BY vendor, source_id, source_type`,
     [userId, orgId, cutoff]
   );
@@ -300,8 +312,13 @@ async function fetchUnallocatedVendorCredits(userId, orgId, asOf) {
     const v = byVendor.get(vendor);
     v.net += num(ln.net);
     // Credit notes debit A/P (net < 0); payments do too, so key on the type.
-    if (/CREDIT/i.test(ln.source_type || '') && num(ln.net) < 0) {
-      v.credits.push({ date: ln.doc_date, amount: -num(ln.net) });
+    // A Xero supplier overpayment (BankSPEND-OVERPAYMENT) also sits on A/P
+    // until it's allocated, and Xero's Aged Payables lists it the same way —
+    // without it a vendor holding only an overpayment (no credit note) was
+    // dropped and the report stopped footing to the A/P balance.
+    if (/CREDIT|OVERPAYMENT/i.test(ln.source_type || '') && num(ln.net) < 0) {
+      const type = /OVERPAYMENT/i.test(ln.source_type) ? 'Overpayment' : undefined;
+      v.credits.push({ date: ln.doc_date, amount: -num(ln.net), type });
     }
   }
 
@@ -313,7 +330,7 @@ async function fetchUnallocatedVendorCredits(userId, orgId, asOf) {
     for (const c of v.credits) {
       if (remaining <= 0.005) break;
       const take = Math.min(remaining, c.amount);
-      out.push({ vendor, date: c.date, amount: -round2(take) });
+      out.push({ vendor, date: c.date, amount: -round2(take), type: c.type });
       remaining = round2(remaining - take);
     }
   }
@@ -352,7 +369,7 @@ async function buildApAgingSummary(userId, params = {}) {
   // excluded are the non-payable ones across all three: Zoho draft/void,
   // Xero DRAFT/SUBMITTED/VOIDED/DELETED.
   const [bills] = await pool.execute(
-    `SELECT qbo_id, bill_number, vendor_name, date, due_date, total, balance, currency_code
+    `SELECT qbo_id, xero_id, bill_number, vendor_name, date, due_date, total, balance, currency_code, exchange_rate
        FROM bills
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'submitted', 'void', 'voided', 'deleted')`,
@@ -360,6 +377,7 @@ async function buildApAgingSummary(userId, params = {}) {
   );
 
   await attachAsOfBillBalances(bills, userId, orgId, asOf);
+  await convertXeroBillsToBase(bills, orgId);
 
   const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
 
@@ -398,8 +416,9 @@ async function buildApAgingSummary(userId, params = {}) {
   };
 
   for (const bill of bills) {
-    // Point-in-time: a bill entered after the as-of date didn't exist yet.
-    if (bill.date && new Date(bill.date) > asOf) continue;
+    // Point-in-time: a bill entered after the as-of date didn't exist yet —
+    // unless it was paid before it was issued (see existedOn).
+    if (!existedOn(bill, asOf)) continue;
     // A bill with no due date is due on receipt (that's how the providers treat
     // it) — never drop it, or the grand total stops matching the platform.
     add(bill.vendor_name, agingByBillDate ? bill.date : (bill.due_date || bill.date), bill._balanceAsOf, bill.bill_number);
@@ -408,7 +427,7 @@ async function buildApAgingSummary(userId, params = {}) {
   // Unapplied vendor credits reduce what's owed, exactly as they do on the
   // platform's own report (a credit note has no due date — it ages by its date).
   for (const c of await fetchUnallocatedVendorCredits(userId, orgId, asOf)) {
-    add(c.vendor, c.date, c.amount, c.ref || 'Vendor Credit');
+    add(c.vendor, c.date, c.amount, c.ref || c.type || 'Vendor Credit');
   }
 
   const rows = [];
@@ -482,6 +501,20 @@ async function buildApAgingSummary(userId, params = {}) {
 // any bill where they disagree (a tracing gap), fall back to that bill's
 // live balance unadjusted, exactly the pre-fix behaviour, for that bill only.
 // Sets `_balanceAsOf` on every bill row.
+
+// Xero bills are stored (total, balance) and reconstructed (_balanceAsOf, from
+// the ledger's native debit/credit) in the bill's OWN currency — a GBP supplier
+// invoice in an INR org would otherwise be summed as rupees. Convert them to
+// base at the bill's own rate, the way A/R Aging does for invoices (invoiceFx
+// knows Xero's CurrencyRate runs foreign-per-base). Zoho and QuickBooks bills
+// are left exactly as these reports have always shown them. Call AFTER
+// attachAsOfBillBalances, which must rewind in the native currency.
+async function convertXeroBillsToBase(bills, orgId) {
+  const fx = await invoiceFxContext(orgId);
+  if (fx.divide) convertInvoicesToBase(bills, fx);
+  return bills;
+}
+
 async function attachAsOfBillBalances(bills, userId, orgId, asOf) {
   await attachLedgerBillBalances(bills, userId, orgId, asOf);
   if (!(await isQuickBooksOrg(orgId))) return;
@@ -529,6 +562,15 @@ async function attachLedgerBillBalances(bills, userId, orgId, asOf) {
     bill._breakdown = [{ name: bill.vendor_name || null, ref: bill.bill_number || null, date: null, type: 'Current balance', amount: bill._balanceAsOf }];
   }
 
+  // Xero bills: rewound from the ledger by the bill's own InvoiceID plus
+  // Xero's dated credit/overpayment/prepayment allocations — shared with A/R
+  // Aging (xeroAsOfBalances). The number␟vendor match below can never work for
+  // Xero, whose ledger keeps only a line index in transaction_number.
+  const xeroBills = bills.filter((b) => b.xero_id);
+  if (xeroBills.length) await attachXeroAsOfBalances(xeroBills, userId, orgId, asOf, 'ap');
+  const others = bills.filter((b) => !b.xero_id);
+  if (!others.length) return;
+
   const cutoff = `${asOf.getFullYear()}-${String(asOf.getMonth() + 1).padStart(2, '0')}-${String(asOf.getDate()).padStart(2, '0')} 23:59:59`;
   const [rows] = await pool.execute(
     `SELECT transaction_number, transaction_details,
@@ -537,7 +579,7 @@ async function attachLedgerBillBalances(bills, userId, orgId, asOf) {
             SUM(credit) - SUM(debit) AS balance_today
        FROM account_transactions
       WHERE user_id = ? AND org_id = ? AND account_type_code = 'accounts_payable'
-        AND transaction_id NOT LIKE 'xero-recon:%'
+        AND ${NOT_SYNTHETIC_XERO_SQL}
       GROUP BY transaction_number, transaction_details`,
     [cutoff, cutoff, userId, orgId]
   );
@@ -555,7 +597,7 @@ async function attachLedgerBillBalances(bills, userId, orgId, asOf) {
             transaction_type, source_type, reference_number, credit, debit
        FROM account_transactions
       WHERE user_id = ? AND org_id = ? AND account_type_code = 'accounts_payable'
-        AND transaction_id NOT LIKE 'xero-recon:%'
+        AND ${NOT_SYNTHETIC_XERO_SQL}
         AND transaction_date <= ?
       ORDER BY transaction_date`,
     [userId, orgId, cutoff]
@@ -567,7 +609,7 @@ async function attachLedgerBillBalances(bills, userId, orgId, asOf) {
     postingsByKey.get(key).push(r);
   }
 
-  for (const bill of bills) {
+  for (const bill of others) {
     const key = `${(bill.bill_number || '').trim()}␟${(bill.vendor_name || '').trim()}`;
     const ledger = byKey.get(key);
     if (!ledger) continue; // no ledger postings traced to this bill at all — keep live balance
@@ -936,4 +978,4 @@ async function computeQboVendorReconciliation(userId, orgId, asOf, cutoff) {
 // fetchUnallocatedVendorCredits and attachAsOfBillBalances are shared with the
 // Vendor Balance Detail report so it shows the identical bill population and
 // as-of reconstruction, and can never independently drift from AP Aging.
-module.exports = { buildApAgingDetail, buildApAgingSummary, fetchUnallocatedVendorCredits, attachAsOfBillBalances };
+module.exports = { buildApAgingDetail, buildApAgingSummary, fetchUnallocatedVendorCredits, attachAsOfBillBalances, convertXeroBillsToBase };

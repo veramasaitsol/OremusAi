@@ -25,6 +25,7 @@
 
 const pool = require('../config/db');
 const { invoiceFxContext, rateToBase, convertInvoicesToBase, toBase } = require('./invoiceFx');
+const { attachXeroAsOfBalances, xeroOpenCredits, existedOn, paidBeforeIssue } = require('./xeroAsOfBalances');
 const { qboUnappliedArCredits } = require('./qboArReconciliation');
 
 // Sales-document source_type codes, by platform. Each connected org belongs to
@@ -182,6 +183,22 @@ async function attachAsOfBalances(invoices, userId, orgId, asOf) {
     // reconstructed, not just the final number.
     inv._breakdown = [{ name: inv.customer_name || null, ref: inv.invoice_number || null, date: null, type: 'Current balance', amount: inv._balanceAsOf }];
     if (inv.invoice_number) byNum.set(String(inv.invoice_number).trim(), inv);
+  }
+
+  // Xero writes no zb_customer_payments / zb_credit_notes, so the rewinds
+  // below find nothing for it and every invoice settled after the as-of date
+  // vanished from a historical aging. Xero invoices are rewound from the ledger
+  // (by InvoiceID) and Xero's dated allocations instead — the same helper A/P
+  // Aging uses — and kept out of the Zoho rewinds so nothing is added twice.
+  const xeroInvoices = invoices.filter((inv) => inv.xero_id);
+  if (xeroInvoices.length) {
+    await attachXeroAsOfBalances(xeroInvoices, userId, orgId, asOf, 'ar');
+    for (const inv of xeroInvoices) {
+      if (inv.invoice_number && byNum.get(String(inv.invoice_number).trim()) === inv) {
+        byNum.delete(String(inv.invoice_number).trim());
+      }
+    }
+    if (!byNum.size) return;
   }
 
   const [payments] = await pool.execute(
@@ -1023,13 +1040,15 @@ async function buildArAgingSummary(userId, params = {}) {
   // Statuses excluded are the non-receivable ones across all three providers:
   // Zoho draft/void, Xero DRAFT/SUBMITTED/VOIDED/DELETED, QuickBooks drafts.
   const [invoices] = await pool.execute(
-    `SELECT invoice_number, customer_name, date, due_date, total, balance, currency_code, exchange_rate
+    `SELECT xero_id, invoice_number, customer_name, date, due_date, total, balance, currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
-        AND date <= ?
+        AND (date <= ? OR xero_id IS NOT NULL)
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'approved', 'submitted', 'void', 'voided', 'deleted')`,
     [userId, orgId, ymd(asOf)]
   );
+  // Later-dated Xero invoices are read too, only so one paid before it was
+  // issued can show as the credit it was on the as-of date (existedOn).
 
   await attachAsOfBalances(invoices, userId, orgId, asOf);
   // The rewind above runs in each invoice's own currency; convert to the org's
@@ -1061,8 +1080,11 @@ async function buildArAgingSummary(userId, params = {}) {
   let grandTotal = 0;
 
   for (const inv of invoices) {
+    if (!existedOn(inv, asOf)) continue;
     const bal = inv._balanceAsOf;
-    if (bal <= 0) continue; // settled on/before the as-of date — not outstanding
+    // Settled on/before the as-of date — not outstanding (unless it's a
+    // receipt taken before its invoice was issued: a credit then).
+    if (bal <= 0 && !paidBeforeIssue(inv, asOf)) continue;
     // An invoice with no due date is due on issue (that's how the providers
     // treat it) — never drop it, or the grand total stops matching the platform.
     const agingDate = agingByInvoiceDate ? inv.date : (inv.due_date || inv.date);
@@ -1111,8 +1133,10 @@ async function buildArAgingSummary(userId, params = {}) {
   }
 
   // QuickBooks: Credit Memos / Journal Entries / Deposits against A/R not yet
-  // applied to an invoice are negative lines, aged by their own date.
-  for (const c of await qboUnappliedArCredits(userId, orgId, asOf)) {
+  // applied to an invoice are negative lines, aged by their own date. Xero:
+  // credit notes / overpayments not yet allocated on the as-of date.
+  const xeroArCredits = (await xeroOpenCredits(userId, orgId, asOf, 'ar')) || [];
+  for (const c of [...await qboUnappliedArCredits(userId, orgId, asOf), ...xeroArCredits]) {
     const age = daysBetween(asOf, new Date(c.date));
     const bucket = bucketFor(age);
     const customer = (c.customer || '').trim() || 'Unknown';

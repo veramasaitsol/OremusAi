@@ -26,6 +26,8 @@
 const pool = require('../config/db');
 const { fetchUnallocatedVendorCredits, attachAsOfBillBalances } = require('./zohoApAgingDetailService');
 const { attachAsOfBalances } = require('./salesArFromInvoicesService');
+const { invoiceFxContext, rateToBase } = require('./invoiceFx');
+const { existedOn } = require('./xeroAsOfBalances');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -129,8 +131,8 @@ async function openByCurrency(table, userId, orgId, base, asOf, excludedStatuses
   const asOfDate = asOf instanceof Date ? asOf : new Date(asOf);
   const placeholders = excludedStatuses.map(() => '?').join(', ');
   const selectCols = table === 'invoices'
-    ? 'invoice_number, date, total, balance, currency_code, exchange_rate'
-    : 'qbo_id, bill_number, vendor_name, date, total, balance, currency_code, exchange_rate';
+    ? 'xero_id, invoice_number, date, total, balance, currency_code, exchange_rate'
+    : 'qbo_id, xero_id, bill_number, vendor_name, date, total, balance, currency_code, exchange_rate';
   const [rows] = await pool.execute(
     `SELECT ${selectCols}
        FROM ${table}
@@ -142,16 +144,18 @@ async function openByCurrency(table, userId, orgId, base, asOf, excludedStatuses
   if (table === 'invoices') await attachAsOfBalances(rows, userId, orgId, asOfDate);
   else await attachAsOfBillBalances(rows, userId, orgId, asOfDate);
 
+  // Xero stores CurrencyRate as foreign units per 1 base unit (divide); Zoho
+  // and QuickBooks the other way round (multiply) — rateToBase knows which.
+  const fx = await invoiceFxContext(orgId);
   const byCode = new Map();
   for (const r of rows) {
-    if (r.date && new Date(r.date) > asOfDate) continue; // didn't exist yet
+    if (!existedOn(r, asOfDate)) continue; // didn't exist yet (unless paid before issue)
     const bal = num(r._balanceAsOf);
     if (bal === 0) continue;
     const code = r.currency_code || base;
-    const rate = num(r.exchange_rate) || 1;
     const g = byCode.get(code) || { bal: 0, baseBal: 0 };
     g.bal += bal;
-    g.baseBal += bal * rate;
+    g.baseBal += bal * rateToBase(code, r.exchange_rate, { ...fx, base });
     byCode.set(code, g);
   }
   return [...byCode.entries()].map(([code, g]) => ({ code, bal: g.bal, baseBal: g.baseBal }));

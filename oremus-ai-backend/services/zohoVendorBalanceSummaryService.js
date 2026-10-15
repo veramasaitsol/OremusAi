@@ -26,7 +26,8 @@
  */
 
 const pool = require('../config/db');
-const { fetchUnallocatedVendorCredits, attachAsOfBillBalances } = require('./zohoApAgingDetailService');
+const { fetchUnallocatedVendorCredits, attachAsOfBillBalances, convertXeroBillsToBase } = require('./zohoApAgingDetailService');
+const { NOT_SYNTHETIC_XERO_SQL, existedOn } = require('./xeroAsOfBalances');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute('SELECT org_id FROM zb_tokens WHERE user_id = ?', [userId]);
@@ -78,7 +79,7 @@ async function buildVendorBalanceSummary(userId, params = {}) {
        FROM account_transactions
       WHERE user_id = ? AND org_id = ? AND account_type_code = 'accounts_payable'
         AND transaction_date BETWEEN ? AND ?
-        AND transaction_id NOT LIKE 'xero-recon:%'
+        AND ${NOT_SYNTHETIC_XERO_SQL}
       GROUP BY vendor`,
     [userId, orgId, from, to]
   );
@@ -87,13 +88,14 @@ async function buildVendorBalanceSummary(userId, params = {}) {
   // end — same bill-level reconstruction as Vendor Balance Detail / AP
   // Aging, summed per vendor instead of listed per document.
   const [bills] = await pool.execute(
-    `SELECT qbo_id, bill_number, vendor_name, date, total, balance, currency_code
+    `SELECT qbo_id, xero_id, bill_number, vendor_name, date, total, balance, currency_code, exchange_rate
        FROM bills
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'submitted', 'void', 'voided', 'deleted')`,
     [userId, orgId]
   );
   await attachAsOfBillBalances(bills, userId, orgId, toDate);
+  await convertXeroBillsToBase(bills, orgId);
 
   const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
 
@@ -110,7 +112,7 @@ async function buildVendorBalanceSummary(userId, params = {}) {
     v.paid += num(r.paid);
   }
   for (const bill of bills) {
-    if (bill.date && new Date(bill.date) > toDate) continue; // didn't exist yet
+    if (!existedOn(bill, toDate)) continue; // didn't exist yet (unless paid before issue)
     get(bill.vendor_name).closing += num(bill._balanceAsOf);
   }
   // Unapplied vendor credits reduce the closing balance, exactly as they do

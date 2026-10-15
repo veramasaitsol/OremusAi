@@ -19,7 +19,8 @@
  */
 
 const pool = require('../config/db');
-const { fetchUnallocatedVendorCredits, attachAsOfBillBalances } = require('./zohoApAgingDetailService');
+const { fetchUnallocatedVendorCredits, attachAsOfBillBalances, convertXeroBillsToBase } = require('./zohoApAgingDetailService');
+const { existedOn } = require('./xeroAsOfBalances');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute('SELECT org_id FROM zb_tokens WHERE user_id = ?', [userId]);
@@ -83,7 +84,7 @@ async function buildVendorBalanceDetail(userId, params = {}) {
   // the as-of balance the same way AP Aging does, so the two can never
   // disagree), non-payable statuses excluded across all three providers.
   const [bills] = await pool.execute(
-    `SELECT qbo_id, bill_number, vendor_name, date, due_date, total, balance, currency_code
+    `SELECT qbo_id, xero_id, bill_number, vendor_name, date, due_date, total, balance, currency_code, exchange_rate
        FROM bills
       WHERE user_id = ? AND org_id = ?
         AND LOWER(COALESCE(status, '')) NOT IN ('draft', 'submitted', 'void', 'voided', 'deleted')`,
@@ -91,6 +92,7 @@ async function buildVendorBalanceDetail(userId, params = {}) {
   );
 
   await attachAsOfBillBalances(bills, userId, orgId, asOf);
+  await convertXeroBillsToBase(bills, orgId);
 
   const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
 
@@ -119,8 +121,9 @@ async function buildVendorBalanceDetail(userId, params = {}) {
   };
 
   for (const bill of bills) {
-    // Point-in-time: a bill entered after the as-of date didn't exist yet.
-    if (bill.date && new Date(bill.date) > asOf) continue;
+    // Point-in-time: a bill entered after the as-of date didn't exist yet —
+    // unless it was paid before it was issued (see existedOn).
+    if (!existedOn(bill, asOf)) continue;
     // Optional From: exclude bills issued before the selected start date.
     if (fromDate && bill.date && new Date(bill.date) < fromDate) continue;
     // Settled on/before the as-of date (per the ledger reconstruction) — not

@@ -17,6 +17,7 @@ const { attachAsOfBalances } = require('./salesArFromInvoicesService');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
 const { invoiceFxContext, rateToBase, convertInvoicesToBase } = require('./invoiceFx');
 const { qboUnappliedArCredits } = require('./qboArReconciliation');
+const { xeroOpenCredits, existedOn, paidBeforeIssue } = require('./xeroAsOfBalances');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute(
@@ -117,7 +118,7 @@ async function buildArAgingDetail(userId, params = {}) {
   // zero balance today may have been open on the as-of date. attachAsOfBalances
   // rewinds post-as-of payments to recover the historical balance.
   const [invoices] = await pool.execute(
-    `SELECT invoice_number, customer_name, status, date, due_date,
+    `SELECT xero_id, invoice_number, customer_name, status, date, due_date,
             total, balance, currency_code, exchange_rate
        FROM invoices
       WHERE user_id = ? AND org_id = ?
@@ -176,8 +177,10 @@ async function buildArAgingDetail(userId, params = {}) {
   }
 
   // QuickBooks: unapplied Credit Memos / Journal Entries / Deposits against A/R
-  // (see qboArReconciliation) — negative lines aged by their own date.
-  for (const c of await qboUnappliedArCredits(userId, orgId, asOf)) {
+  // (see qboArReconciliation) — negative lines aged by their own date. Xero:
+  // credit notes / overpayments not yet allocated on the as-of date.
+  const xeroArCredits = (await xeroOpenCredits(userId, orgId, asOf, 'ar')) || [];
+  for (const c of [...await qboUnappliedArCredits(userId, orgId, asOf), ...xeroArCredits]) {
     invoices.push({
       invoice_number: c.docNumber || '',
       customer_name: c.customer,
@@ -209,10 +212,12 @@ async function buildArAgingDetail(userId, params = {}) {
   for (const inv of invoices) {
     // Point-in-time: skip invoices issued after the as-of date (didn't exist
     // yet) and any already settled on/before it (no outstanding balance then).
-    if (inv.date && new Date(inv.date) > asOf) continue;
+    // A Xero invoice paid before it was issued counts too (see existedOn).
+    if (!existedOn(inv, asOf)) continue;
     // Unapplied-payment credit rows carry a NEGATIVE balance by design — only
-    // invoices are dropped once fully settled.
-    if (!inv._isPayment && inv._balanceAsOf <= 0) continue;
+    // invoices are dropped once fully settled (a receipt taken before its
+    // invoice was issued is such a credit on the as-of date).
+    if (!inv._isPayment && inv._balanceAsOf <= 0 && !paidBeforeIssue(inv, asOf)) continue;
     // An invoice with no due date is due on issue (how all three providers
     // treat it) — never drop it, or its balance vanishes from the total.
     const basis = ageFromInvoiceDate ? (inv.date || inv.due_date)

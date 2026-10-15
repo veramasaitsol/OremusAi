@@ -644,7 +644,7 @@ async function buildStagingLedger(userId, opts = {}) {
   // endpoint 401s for a given connection, fetchEntity records the error, the
   // clean wipe is skipped, and the trial-balance true-up covers the banks as
   // before — no regression. banktransfers is included for multi-bank orgs.
-  const { maxPages = 0, fresh = true, entities = ['invoices', 'creditnotes', 'banktransactions', 'manualjournals', 'banktransfers', 'payments', 'prepayments'] } = opts;
+  const { maxPages = 0, fresh = true, entities = ['invoices', 'creditnotes', 'banktransactions', 'manualjournals', 'banktransfers', 'payments', 'prepayments', 'overpayments'] } = opts;
   const auth = await getValidXeroToken(userId);
   if (!auth) throw new Error('Xero not connected for this user');
   const orgId = auth.tenantId;
@@ -692,21 +692,55 @@ async function buildStagingLedger(userId, opts = {}) {
   // can't read them, the rebuild still runs exactly as it did before.
   const pps = await fetchEntity('prepayments', 'Prepayments');
   const prepaymentsById = new Map((pps || []).map((pp) => [String(pp.PrepaymentID), pp]));
+  // Overpayments post nothing new (the SPEND/RECEIVE-OVERPAYMENT bank
+  // transaction already did); they're fetched only for their dated
+  // Allocations, which — with the credit notes' and prepayments' — tell the
+  // aging reports WHEN a bill/invoice was settled by something other than cash.
+  const ops = await fetchEntity('overpayments', 'Overpayments');
+  try {
+    const { persistXeroAllocations } = require('./xeroAllocationsService');
+    stats.allocations = await persistXeroAllocations(userId, orgId, {
+      creditNotes: cns, overpayments: ops, prepayments: pps, bankTransactions: bts,
+      invoices: invs, payments: pays,
+    });
+  } catch (e) {
+    // Reporting enrichment only — never fail the ledger rebuild over it.
+    console.warn('[Xero staging] allocation store skipped:', e.message);
+  }
 
   // A clean wipe-and-rebuild is only safe when EVERY requested entity fetched
   // OK. On a partial fetch we skip the wipe and let writeDoc's ON DUPLICATE KEY
   // UPDATE refresh what we did get, so a rate-limited run never empties the
   // ledger (the next full sync reconciles).
-  const OPTIONAL_ENTITIES = new Set(['prepayments']);
+  const OPTIONAL_ENTITIES = new Set(['prepayments', 'overpayments']);
   const allFetched = entities.every((k) => OPTIONAL_ENTITIES.has(k) || errors[k] == null);
 
   const conn = await pool.getConnection();
   try {
-    if (fresh && allFetched) {
+    const wiped = fresh && allFetched;
+    if (wiped) {
       await conn.execute(
         `DELETE FROM account_transactions WHERE user_id = ? AND org_id = ? AND transaction_id LIKE 'xero:%'`,
         [userId, String(orgId)]
       );
+    } else {
+      // Partial run (an endpoint failed — e.g. /Payments 401 without the
+      // payments scope): nothing is wiped, so a document Xero has since VOIDED
+      // or DELETED would keep its old lines for ever (a voided bill stayed on
+      // A/P and the Balance Sheet). Drop just those documents' lines — Xero
+      // has told us authoritatively they no longer post.
+      const gone = [
+        ...(invs || []).filter((d) => !posts('invoice', d.Status)).map((d) => d.InvoiceID),
+        ...(cns || []).filter((d) => !posts('creditnote', d.Status)).map((d) => d.CreditNoteID),
+        ...(bts || []).filter((d) => !posts('banktxn', d.Status)).map((d) => d.BankTransactionID),
+      ].filter(Boolean).map((id) => `xero:${id}`);
+      for (let i = 0; i < gone.length; i += 500) {
+        const [res] = await conn.query(
+          'DELETE FROM account_transactions WHERE user_id = ? AND org_id = ? AND transaction_id IN (?)',
+          [userId, String(orgId), gone.slice(i, i + 500)]
+        );
+        stats.removedNonPosting = (stats.removedNonPosting || 0) + res.affectedRows;
+      }
     }
 
     if (invs) {
@@ -1535,4 +1569,6 @@ module.exports = {
   buildPrepaymentAllocationLines,
   buildBankTransferLines,
   balance,
+  fetchAllPages,
+  toDate,
 };
