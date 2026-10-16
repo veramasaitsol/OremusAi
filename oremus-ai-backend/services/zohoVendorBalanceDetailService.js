@@ -16,11 +16,16 @@
  * credits — the same population as the A/P Aging reports, so the grand TOTAL
  * always agrees with A/P Aging Detail/Summary. Provider-agnostic: pass the
  * connection's org_id (Zoho org / QBO realm / Xero tenant).
+ *
+ * QuickBooks and Xero print QuickBooks' layout (Amount · Open balance · running
+ * Balance — see renderRunningLayout). Xero has no such report of its own; its
+ * open balances are rewound to the report date like its A/P Aging (which ties
+ * to Xero's own Aged Payables), rather than QuickBooks' "still open today".
  */
 
 const pool = require('../config/db');
 const { fetchUnallocatedVendorCredits, attachAsOfBillBalances, convertXeroBillsToBase } = require('./zohoApAgingDetailService');
-const { existedOn } = require('./xeroAsOfBalances');
+const { existedOn, paidBeforeIssue, xeroOpenCredits } = require('./xeroAsOfBalances');
 
 async function getOrgId(userId) {
   const [[row]] = await pool.execute('SELECT org_id FROM zb_tokens WHERE user_id = ?', [userId]);
@@ -100,6 +105,9 @@ async function buildVendorBalanceDetail(userId, params = {}) {
   // in date order). Other platforms keep the single per-document Balance.
   const [[qbo]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
     .catch(() => [[null]]);
+  const [[xero]] = qbo ? [[null]]
+    : await pool.execute('SELECT 1 AS x FROM xero_organizations WHERE tenant_id = ? LIMIT 1', [String(orgId)])
+      .catch(() => [[null]]);
 
   // QuickBooks prints every transaction dated on or before the report date at
   // its open balance TODAY (a bill dated before the date but paid after it is
@@ -110,6 +118,7 @@ async function buildVendorBalanceDetail(userId, params = {}) {
   const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
 
   if (qbo) return buildQboLayout(bills, userId, orgId, asOf, fromDate, currency);
+  if (xero) return buildXeroLayout(bills, userId, orgId, asOf, fromDate, currency);
 
   const columns = [
     { key: 'label',   label: 'Date',             align: 'left'  },
@@ -230,16 +239,6 @@ async function buildVendorBalanceDetail(userId, params = {}) {
 // Open balance its unapplied part today, and Balance the running sum of open
 // balances in date order. Bill balances arrive already computed for today.
 async function buildQboLayout(bills, userId, orgId, asOf, fromDate, currency) {
-  const columns = [
-    { key: 'label',   label: 'Date',             align: 'left'  },
-    { key: 'txnType', label: 'Transaction type', align: 'left'  },
-    { key: 'invoice', label: 'Num',              align: 'left'  },
-    { key: 'dueDate', label: 'Due date',         align: 'left'  },
-    { key: 'amount',  label: 'Amount',           align: 'right' },
-    { key: 'open',    label: 'Open balance',     align: 'right' },
-    { key: 'balance', label: 'Balance',          align: 'right' },
-  ];
-
   const byVendor = new Map();
   const push = (vendorName, doc) => {
     const vendor = (vendorName || '').trim() || 'Unknown';
@@ -272,6 +271,89 @@ async function buildQboLayout(bills, userId, orgId, asOf, fromDate, currency) {
       txnId: String(c.key || '').split('|')[1], // `${type}|${source_id}|…`
     });
   }
+
+  return renderRunningLayout(byVendor, { asOf, fromDate, currency });
+}
+
+// ── Xero: QuickBooks' layout, balances as of the report date ─────────────────
+// Every bill still owing on the report date (already rewound and converted to
+// base by attachAsOfBillBalances / convertXeroBillsToBase — the A/P Aging
+// figures), plus each supplier credit note / overpayment still unallocated on
+// it: Amount is the document's full value, Open balance what was open on the
+// date, Balance the vendor's running total.
+async function buildXeroLayout(bills, userId, orgId, asOf, fromDate, currency) {
+  const docs = [];
+  for (const bill of bills) {
+    if (!existedOn(bill, asOf)) continue;
+    if (fromDate && bill.date && new Date(bill.date) < fromDate) continue;
+    if (round2(bill._balanceAsOf) === 0) continue;
+    if (paidBeforeIssue(bill, asOf)) {
+      // Paid before it was issued: on the report date the bill didn't exist
+      // yet, only its payment — listed as that payment, on its own date.
+      const paidOn = (bill._breakdown || []).filter((b) => b.date && b.amount < 0).map((b) => b.date).sort()[0];
+      docs.push({
+        vendor: bill.vendor_name,
+        date: paidOn || bill.date,
+        txnType: 'Bill Payment',
+        num: bill.bill_number || '',
+        dueDate: '',
+        amount: num(bill._balanceAsOf),
+        open: num(bill._balanceAsOf),
+      });
+      continue;
+    }
+    docs.push({
+      vendor: bill.vendor_name,
+      date: bill.date,
+      txnType: 'Bill',
+      num: bill.bill_number || '',
+      dueDate: fmtDateUS(bill.due_date || bill.date),
+      amount: num(bill.total),
+      open: num(bill._balanceAsOf),
+    });
+  }
+  // Exact open credits once Xero's allocations are synced; until then the
+  // ledger-inferred ones the A/P Aging uses (open part only).
+  const exact = await xeroOpenCredits(userId, orgId, asOf, 'ap');
+  const credits = exact
+    ? exact.map(({ customer, ...c }) => ({ vendor: customer, ...c }))
+    : await fetchUnallocatedVendorCredits(userId, orgId, asOf);
+  for (const c of credits) {
+    if (fromDate && c.date && new Date(c.date) < fromDate) continue;
+    docs.push({
+      vendor: c.vendor,
+      date: c.date,
+      txnType: c.type || 'Vendor Credit',
+      num: c.docNumber || '',
+      dueDate: '',
+      amount: c.total != null ? num(c.total) : num(c.amount),
+      open: num(c.amount),
+    });
+  }
+  // Xero ids carry no entry order, so a day's documents list by number.
+  docs.sort((a, b) => String(a.num).localeCompare(String(b.num), undefined, { numeric: true }));
+  const byVendor = new Map();
+  for (const d of docs) {
+    const vendor = (d.vendor || '').trim() || 'Unknown';
+    if (!byVendor.has(vendor)) byVendor.set(vendor, []);
+    byVendor.get(vendor).push(d);
+  }
+  return renderRunningLayout(byVendor, { asOf, fromDate, currency });
+}
+
+// QuickBooks' columns: Amount (the transaction), Open balance (what's still
+// owed on it) and Balance (the vendor's running total of open balances, in
+// date order).
+function renderRunningLayout(byVendor, { asOf, fromDate, currency }) {
+  const columns = [
+    { key: 'label',   label: 'Date',             align: 'left'  },
+    { key: 'txnType', label: 'Transaction type', align: 'left'  },
+    { key: 'invoice', label: 'Num',              align: 'left'  },
+    { key: 'dueDate', label: 'Due date',         align: 'left'  },
+    { key: 'amount',  label: 'Amount',           align: 'right' },
+    { key: 'open',    label: 'Open balance',     align: 'right' },
+    { key: 'balance', label: 'Balance',          align: 'right' },
+  ];
 
   const ymd = (d) => {
     const dt = d instanceof Date ? d : new Date(d);
