@@ -9,7 +9,7 @@
  *   Date | Track 1099 | Transaction type | Num | Posting (Y/N)
  *        | Memo | Account full name | Item split account | Amount
  *
- * For Zoho and Xero the report follows Accounts Payable: every bill a vendor
+ * For Zoho the report follows Accounts Payable: every bill a vendor
  * raised and every payment or credit that cleared it, which is why "Account
  * full name" reads Accounts Payable throughout. "Item split account" is the
  * other side of the entry, left blank when the transaction splits across
@@ -19,6 +19,8 @@
  * period, and the report's total is exactly the period's movement on Accounts
  * Payable. QuickBooks lists every transaction that names a vendor instead, on
  * the account the transaction books to (see the QuickBooks section below).
+ * Xero has no such report; it gets QuickBooks' layout from the contact Xero
+ * stamps on every ledger line (see xeroTransactionListByVendor).
  *
  * Built entirely from `account_transactions` — the balanced double-entry ledger
  * all three platforms sync into — so the same code serves Zoho, QuickBooks and
@@ -30,6 +32,7 @@
 
 const pool = require('../config/db');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
+const { xeroTransactionEntries } = require('./xeroTransactionListByVendor');
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const r2 = (n) => Math.round(num(n) * 100) / 100;
@@ -461,7 +464,14 @@ async function qboEntries(userId, orgId, from, to, lines) {
   return out;
 }
 
-// Zoho and Xero: what passed through Accounts Payable (see the header).
+async function isXeroOrg(orgId, platform) {
+  if (platform) return platform === 'xero';
+  const [[r]] = await pool.execute('SELECT 1 AS x FROM xero_organizations WHERE tenant_id = ? LIMIT 1', [String(orgId)])
+    .catch(() => [[null]]);
+  return !!r;
+}
+
+// Zoho: what passed through Accounts Payable (see the header).
 async function payableEntries(userId, orgId, from, to, lines) {
   const docs = await vendorDocuments(userId, orgId, from, to);
 
@@ -528,28 +538,34 @@ async function buildTransactionListByVendor(userId, params = {}) {
   const platform = resolvePlatform(params);
   const { from, to } = resolveRange(params);
   const isQbo = await isQuickBooksOrg(orgId, platform);
+  const isXero = !isQbo && (await isXeroOrg(orgId, platform));
   const withMemo = isQbo && (await hasLedgerMemo());
-
-  const platClause = platform ? ' AND platform = ?' : '';
-  const scope = platform ? [userId, orgId, platform] : [userId, orgId];
-  const [lines] = await pool.execute(
-    `SELECT source_id, source_type, transaction_type, transaction_date,
-            account_id, account_name, account_type_code,
-            COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
-            transaction_details, reference_number${withMemo ? ', memo' : ''}
-       FROM account_transactions
-      WHERE user_id = ? AND org_id = ?${platClause}
-        AND transaction_date BETWEEN ? AND ?
-        AND COALESCE(source_id, '') <> ''
-      ORDER BY transaction_date, source_id, line_number`,
-    [...scope, from, to]
-  );
 
   const currency = await getBaseCurrency(orgId);
   const tracked1099 = await trackedContractors(userId, orgId);
-  const entries = isQbo
-    ? await qboEntries(userId, orgId, from, to, lines)
-    : await payableEntries(userId, orgId, from, to, lines);
+  let entries;
+  let note;
+  if (isXero) {
+    ({ entries, note } = await xeroTransactionEntries(userId, orgId, from, to));
+  } else {
+    const platClause = platform ? ' AND platform = ?' : '';
+    const scope = platform ? [userId, orgId, platform] : [userId, orgId];
+    const [lines] = await pool.execute(
+      `SELECT source_id, source_type, transaction_type, transaction_date,
+              account_id, account_name, account_type_code,
+              COALESCE(base_debit, debit) AS debit, COALESCE(base_credit, credit) AS credit,
+              transaction_details, reference_number${withMemo ? ', memo' : ''}
+         FROM account_transactions
+        WHERE user_id = ? AND org_id = ?${platClause}
+          AND transaction_date BETWEEN ? AND ?
+          AND COALESCE(source_id, '') <> ''
+        ORDER BY transaction_date, source_id, line_number`,
+      [...scope, from, to]
+    );
+    entries = isQbo
+      ? await qboEntries(userId, orgId, from, to, lines)
+      : await payableEntries(userId, orgId, from, to, lines);
+  }
 
   entries.sort(
     (a, b) =>
@@ -622,7 +638,7 @@ async function buildTransactionListByVendor(userId, params = {}) {
     columns,
     rows,
     currency,
-    meta: { title: 'Transaction List by Vendor', from, to, basis: 'Accrual', source: 'ledger' },
+    meta: { title: 'Transaction List by Vendor', from, to, basis: 'Accrual', source: 'ledger', ...(note ? { note } : {}) },
   };
 }
 

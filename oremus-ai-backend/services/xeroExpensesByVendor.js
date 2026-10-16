@@ -83,13 +83,21 @@ async function contactRoles(userId, orgId) {
   return { vendors, customers };
 }
 
+// The supplier a Xero contact on a document of `stype` stands for, or null:
+// a supplier contact always; any other contact on a purchase document unless
+// it's only a customer (QuickBooks: a purchase paid to a customer isn't a
+// vendor's). Shared with Transaction List by Vendor so both list the same vendors.
+function xeroVendorName(contact, stype, roles) {
+  const name = String(contact || '').trim();
+  if (!name) return null;
+  if (roles.vendors.has(key(name))) return roles.vendors.get(key(name));
+  if (PURCHASE_DOCS.has(stype) && !roles.customers.has(key(name))) return name;
+  return null;
+}
+
 function vendorOf(line, roles) {
   if (line.stype === 'ManualJournal' || isSynthetic(line)) return NOT_SPECIFIED;
-  const name = String(line.details || '').trim();
-  if (!name) return NOT_SPECIFIED;
-  if (roles.vendors.has(key(name))) return roles.vendors.get(key(name));
-  if (PURCHASE_DOCS.has(line.stype) && !roles.customers.has(key(name))) return name;
-  return NOT_SPECIFIED;
+  return xeroVendorName(line.details, line.stype, roles) || NOT_SPECIFIED;
 }
 
 function entryOf(line, vendor, amount, extra = {}) {
@@ -233,4 +241,4 @@ async function xeroExpenseEntries(userId, orgId, from, to, { cash = false } = {}
   return { entries, allocationsSynced: true };
 }
 
-module.exports = { xeroExpenseEntries, NOT_SPECIFIED };
+module.exports = { xeroExpenseEntries, xeroVendorName, contactRoles, CUSTOMER_DOCS, NOT_SPECIFIED };
