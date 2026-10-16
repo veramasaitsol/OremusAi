@@ -302,6 +302,7 @@ function transformGeneralLedger(body) {
           accountName: accCtx.name || null,
           sourceType:  get(iType) || null,
           sourceRef:   colId(txnCell),
+          nameRef:     colId(cd[iName]), // the Name's customer/vendor/employee id
         });
       }
     });

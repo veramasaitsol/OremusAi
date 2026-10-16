@@ -660,52 +660,126 @@ const QBO_GL_TYPE_TO_ENTITY = {
   'Refund Receipt':              'RefundReceipt',
 };
 
-// Journal-entry lines carry their customer/vendor in JournalEntryLineDetail
-// .Entity, but QBO's GeneralLedger report leaves "Name" blank for many of them
-// (only the memo shows). Collected here — from the same JournalEntry fetch the
-// currency lookup already makes — so each GL row can take its real entity.
-// Key: `${jeId}` → [{ account, amount, side, name }].
-function collectJournalEntities(entries, out) {
-  for (const je of entries) {
+// Journal-entry and deposit lines each carry their own customer/vendor/employee
+// (JournalEntryLineDetail.Entity / DepositLineDetail.Entity), but QBO's
+// GeneralLedger report leaves "Name" blank for many of them (only the memo
+// shows). Collected here — from the same entity fetch the currency lookup
+// already makes — so each GL row can take its real entity.
+// Key: `${entity}:${id}` → [{ account, amount, side, name, id, type }].
+const LINE_ENTITY_DOCS = new Set(['JournalEntry', 'Deposit']);
+
+function lineEntity(entity, ln) {
+  if (entity === 'JournalEntry') {
+    if (ln.DetailType !== 'JournalEntryLineDetail') return null;
+    const det = ln.JournalEntryLineDetail || {};
+    const ref = det.Entity?.EntityRef || {};
+    return {
+      account: det.AccountRef?.value, amount: Number(ln.Amount) || 0,
+      side: det.PostingType === 'Credit' ? 'credit' : 'debit',
+      name: ref.name || det.Entity?.Name || null, id: ref.value, type: det.Entity?.Type,
+    };
+  }
+  if (ln.DetailType !== 'DepositLineDetail') return null;
+  const det = ln.DepositLineDetail || {};
+  const ref = det.Entity?.EntityRef || det.Entity || {};
+  const amount = Number(ln.Amount) || 0;
+  // A deposit line credits its account; a negative one debits it.
+  return {
+    account: det.AccountRef?.value, amount: Math.abs(amount), side: amount < 0 ? 'debit' : 'credit',
+    name: ref.name || null, id: ref.value, type: det.Entity?.Type || ref.type,
+  };
+}
+
+// QuickBooks spells the kind 'Vendor' on most documents but 'VENDOR' on
+// deposit lines; store one spelling.
+const ENTITY_TYPES = { vendor: 'Vendor', customer: 'Customer', employee: 'Employee' };
+const entityType = (t) => (t ? ENTITY_TYPES[String(t).toLowerCase()] || String(t) : null);
+
+function collectLineEntities(entity, docs, out) {
+  for (const doc of docs) {
     const lines = [];
-    for (const ln of je.Line || []) {
-      if (ln.DetailType !== 'JournalEntryLineDetail') continue;
-      const det = ln.JournalEntryLineDetail || {};
-      const name = det.Entity?.EntityRef?.name || det.Entity?.Name || null;
-      if (!name) continue;
+    for (const ln of doc.Line || []) {
+      const e = lineEntity(entity, ln);
+      if (!e || !e.name) continue;
       lines.push({
-        account: String(det.AccountRef?.value || ''),
-        amount: Math.round((Number(ln.Amount) || 0) * 100) / 100,
-        side: det.PostingType === 'Credit' ? 'credit' : 'debit',
-        name,
+        account: String(e.account || ''),
+        amount: Math.round(e.amount * 100) / 100,
+        side: e.side,
+        name: e.name,
+        id: e.id != null ? String(e.id) : null,
+        type: entityType(e.type),
       });
     }
-    if (lines.length && je.Id != null) out.set(String(je.Id), lines);
+    if (lines.length && doc.Id != null) out.set(`${entity}:${doc.Id}`, lines);
   }
 }
 
-// The entity of one GL journal row: the journal's line on the same account,
-// side and amount (one match), else the only entity line on that account.
-function journalEntityFor(journalEntities, jeId, accountRef, debit, credit) {
-  const lines = journalEntities.get(String(jeId)) || [];
+// The entity of one GL journal/deposit row: the document's line on the same
+// account, side and amount (one match), else the only entity on that account.
+function lineEntityFor(lineEntities, key, accountRef, debit, credit) {
+  const lines = lineEntities.get(key) || [];
   const side = credit > 0 ? 'credit' : 'debit';
   const amount = credit > 0 ? credit : debit;
   const onAccount = lines.filter((l) => l.account === String(accountRef));
   const exact = onAccount.filter((l) => l.side === side && Math.abs(l.amount - amount) < 0.005);
-  if (exact.length) return exact[0].name;
+  if (exact.length) return exact[0];
   const names = [...new Set(onAccount.map((l) => l.name))];
-  return names.length === 1 ? names[0] : null;
+  return names.length === 1 ? onAccount[0] : null;
 }
 
-async function buildQboCurrencyMap(realmId, accessToken, environment, neededEntities, journalEntities = null) {
+// The payee/customer a whole document belongs to. Bills, vendor credits and
+// bill payments always name a vendor; a Purchase (Expense / Check / Credit Card
+// Expense) names a vendor, customer or employee and says which.
+function docEntity(entity, item) {
+  const vendor = item.VendorRef;
+  if (['Bill', 'VendorCredit', 'BillPayment'].includes(entity) && vendor?.value) {
+    return { id: String(vendor.value), type: 'Vendor', name: vendor.name || null };
+  }
+  if (entity === 'Purchase' && item.EntityRef?.value) {
+    const r = item.EntityRef;
+    return { id: String(r.value), type: entityType(r.type), name: r.name || null };
+  }
+  const customer = item.CustomerRef;
+  if (['Invoice', 'Payment', 'CreditMemo', 'SalesReceipt', 'RefundReceipt'].includes(entity) && customer?.value) {
+    return { id: String(customer.value), type: 'Customer', name: customer.name || null };
+  }
+  return null;
+}
+
+// Back-compat: the name-only journal lookup the GL sync used before entities.
+function collectJournalEntities(entries, out) {
+  collectLineEntities('JournalEntry', entries, out);
+}
+function journalEntityFor(journalEntities, jeId, accountRef, debit, credit) {
+  return lineEntityFor(journalEntities, `JournalEntry:${jeId}`, accountRef, debit, credit)?.name || null;
+}
+
+// The vendor whose bill payment settled each document: `${TxnType}:${TxnId}`
+// → { id, type, name }, from every BillPayment's applied lines (LinkedTxn).
+function collectPaidBy(payments, out) {
+  for (const p of payments) {
+    if (!p.VendorRef?.value) continue;
+    const vendor = { id: String(p.VendorRef.value), type: 'Vendor', name: p.VendorRef.name || null };
+    for (const ln of p.Line || []) {
+      for (const t of ln.LinkedTxn || []) {
+        if (t.TxnType && t.TxnId) out.set(`${t.TxnType}:${t.TxnId}`, vendor);
+      }
+    }
+  }
+}
+
+async function buildQboCurrencyMap(realmId, accessToken, environment, neededEntities, journalEntities = null, docEntities = null, paidBy = null) {
   const map = {}; // `${entity}:${id}` -> currency code (e.g. 'USD', 'EUR')
   await Promise.all([...neededEntities].map(async (entity) => {
     try {
       const items = await fetchAllEntities(realmId, accessToken, environment, entity);
-      if (entity === 'JournalEntry' && journalEntities) collectJournalEntities(items, journalEntities);
+      if (LINE_ENTITY_DOCS.has(entity) && journalEntities) collectLineEntities(entity, items, journalEntities);
+      if (entity === 'BillPayment' && paidBy) collectPaidBy(items, paidBy);
       for (const item of items) {
         const code = item.CurrencyRef?.value;
         if (code && item.Id != null) map[`${entity}:${item.Id}`] = code;
+        const owner = docEntities && item.Id != null ? docEntity(entity, item) : null;
+        if (owner) docEntities.set(`${entity}:${item.Id}`, owner);
       }
     } catch (e) {
       console.warn(`[QBO currency map] ${entity} fetch failed:`, e.response?.data?.Fault?.Error?.[0]?.Message || e.message);
@@ -739,6 +813,175 @@ function ensureLedgerMemoColumn() {
   return ledgerMemoReady;
 }
 
+// account_transactions.contact_*: who a QuickBooks ledger line belongs to —
+// the customer / vendor / employee id, its kind and its name — kept apart from
+// `transaction_details` (which falls back to the memo, so a memo reading
+// "Uber" on a payee-less expense looks just like vendor Uber). QuickBooks'
+// vendor reports count a line under a vendor only when its name IS a Vendor.
+// NULL contact_type on every line of a company = synced before these columns.
+// (db/qbo-ledger-contacts.sql applies the same change.)
+const LEDGER_CONTACT_COLUMNS = {
+  contact_id:   'VARCHAR(64) NULL',
+  contact_type: 'VARCHAR(16) NULL',
+  contact_name: 'VARCHAR(255) NULL',
+};
+let ledgerContactsReady = null;
+function ensureLedgerContactColumns() {
+  if (!ledgerContactsReady) {
+    ledgerContactsReady = (async () => {
+      const [cols] = await pool.execute(
+        `SELECT COLUMN_NAME AS name FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'account_transactions'`
+      );
+      const have = new Set(cols.map((c) => c.name));
+      for (const [name, type] of Object.entries(LEDGER_CONTACT_COLUMNS)) {
+        if (have.has(name)) continue;
+        // Another company's sync may add it first.
+        await pool.execute(`ALTER TABLE account_transactions ADD COLUMN ${name} ${type}`)
+          .catch((e) => { if (e.code !== 'ER_DUP_FIELDNAME') throw e; });
+      }
+      return true;
+    })().catch((e) => {
+      ledgerContactsReady = null;
+      console.warn('[QBO GL] contact columns unavailable, syncing without them:', e.message);
+      return false;
+    });
+  }
+  return ledgerContactsReady;
+}
+
+// qbo_cash_ledger: QuickBooks' own Cash-basis GeneralLedger (the same report
+// with accounting_method=Cash), one row per posting line. Cash-basis reports
+// read it instead of re-deriving cash timing: QuickBooks moves each bill's
+// expense lines to the dates the bill was paid, pro rata, which the accrual
+// ledger + bill-payment links can't reproduce exactly. Replaced per company on
+// every sync. (db/qbo-ledger-contacts.sql creates the same table.)
+async function ensureCashLedgerTable() {
+  await pool.execute(
+    `CREATE TABLE IF NOT EXISTS qbo_cash_ledger (
+       id                INT AUTO_INCREMENT PRIMARY KEY,
+       user_id           INT           NOT NULL,
+       org_id            VARCHAR(64)   NOT NULL,
+       account_id        VARCHAR(64)   NOT NULL,
+       account_name      VARCHAR(255)  NULL,
+       account_group     VARCHAR(32)   NULL,
+       account_type_code VARCHAR(64)   NULL,
+       account_sub_type  VARCHAR(64)   NULL,
+       transaction_date  DATE          NOT NULL,
+       transaction_type  VARCHAR(64)   NULL,
+       source_id         VARCHAR(64)   NULL,
+       reference_number  VARCHAR(255)  NULL,
+       name              VARCHAR(255)  NULL,
+       memo              TEXT          NULL,
+       debit             DECIMAL(18,2) NOT NULL DEFAULT 0,
+       credit            DECIMAL(18,2) NOT NULL DEFAULT 0,
+       currency_code     VARCHAR(8)    NULL,
+       contact_id        VARCHAR(64)   NULL,
+       contact_type      VARCHAR(16)   NULL,
+       contact_name      VARCHAR(255)  NULL,
+       synced_at         DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       KEY idx_org_date (org_id, transaction_date),
+       KEY idx_org_group (org_id, account_group),
+       KEY idx_user_org (user_id, org_id)
+     )`
+  );
+}
+
+// id → 'Vendor' | 'Customer' | 'Employee' for every name in the company
+// (QuickBooks numbers all three from one sequence), for GL lines whose kind
+// isn't known from their document.
+async function qboNameTypes(userId, realmId, accessToken, environment) {
+  const types = new Map();
+  const [vendors] = await pool.execute(
+    'SELECT qbo_id FROM vendors WHERE user_id = ? AND org_id = ? AND qbo_id IS NOT NULL', [userId, String(realmId)]);
+  for (const v of vendors) types.set(String(v.qbo_id), 'Vendor');
+  const [customers] = await pool.execute(
+    'SELECT qbo_id FROM customers WHERE user_id = ? AND org_id = ? AND qbo_id IS NOT NULL', [userId, String(realmId)]);
+  for (const c of customers) types.set(String(c.qbo_id), 'Customer');
+  try {
+    for (const e of await fetchAllEntities(realmId, accessToken, environment, 'Employee')) types.set(String(e.Id), 'Employee');
+  } catch (e) {
+    console.warn('[QBO GL] Employee fetch failed:', e.response?.data?.Fault?.Error?.[0]?.Message || e.message);
+  }
+  return types;
+}
+
+// Who one GL row belongs to: a journal/deposit line's own entity, else its
+// document's payee/customer, else the report's Name (kind looked up by id).
+// Cash basis: a vendor payment made before its bill sits on "Unapplied Cash
+// Bill Payment Expense" until applied; the document it's applied to then
+// reverses it there with no Name, and QuickBooks counts that reversal under
+// the paying vendor — which for a journal entry is known only from the payment.
+function ledgerContactFor(r, glEntity, accountRef, debit, credit, ctx) {
+  const key = glEntity && r.sourceRef != null ? `${glEntity}:${r.sourceRef}` : null;
+  if (key && LINE_ENTITY_DOCS.has(glEntity)) {
+    const e = lineEntityFor(ctx.lineEntities, key, accountRef, debit, credit);
+    if (e) return { id: e.id, type: e.type, name: e.name };
+    if (ctx.unappliedAccounts?.has(String(accountRef)) && ctx.paidBy?.has(key)) return ctx.paidBy.get(key);
+  }
+  const owner = key ? ctx.docEntities.get(key) : null;
+  if (owner) return owner;
+  if (r.nameRef) return { id: r.nameRef, type: ctx.nameTypes.get(r.nameRef) || null, name: r.cells?.name || null };
+  return null;
+}
+
+// Posting lines of a transformed GL report: dated, on an account, non-zero.
+function glPostingLines(gl) {
+  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const out = [];
+  for (const r of gl.rows) {
+    if (r.isHeader || r.isSubtotal || r.isTotal) continue;
+    const ref = r.accountRef ? String(r.accountRef) : null;
+    if (!ref) continue; // a posting line must belong to an account
+    const date = /^\d{4}-\d{2}-\d{2}/.test(String(r.label || '')) ? String(r.label).slice(0, 10) : null;
+    if (!date) continue; // skip non-dated rows (beginning-balance headers)
+    const debit  = round2(r.cells?.debit);
+    const credit = round2(r.cells?.credit);
+    if (debit === 0 && credit === 0) continue;
+    const glType = r.cells?.type || r.sourceType || null;
+    out.push({ r, ref, date, debit, credit, glType, glEntity: QBO_GL_TYPE_TO_ENTITY[glType] });
+  }
+  return out;
+}
+
+async function storeCashLedger(userId, realmId, cashGl, acctMap, ctx) {
+  await ensureCashLedgerTable();
+  const rows = [];
+  for (const { r, ref, date, debit, credit, glType, glEntity } of glPostingLines(cashGl)) {
+    const acct = acctMap[ref] || {};
+    const who = ledgerContactFor(r, glEntity, ref, debit, credit, ctx);
+    rows.push([
+      userId, String(realmId), ref, acct.name || r.cells?.account || null, acct.group || null, acct.code || null,
+      acct.subType || null,
+      date, glType, r.sourceRef || null, r.cells?.docnum || null,
+      r.cells?.name || null, r.cells?.memo || null, debit, credit,
+      (glEntity && r.sourceRef != null && ctx.currencyMap[`${glEntity}:${r.sourceRef}`]) || ctx.homeCurrency || null,
+      who?.id || null, who?.type || null, who?.name || null,
+    ]);
+  }
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute('DELETE FROM qbo_cash_ledger WHERE user_id = ? AND org_id = ?', [userId, String(realmId)]);
+    for (let i = 0; i < rows.length; i += 500) {
+      await conn.query(
+        `INSERT INTO qbo_cash_ledger
+           (user_id, org_id, account_id, account_name, account_group, account_type_code, account_sub_type,
+            transaction_date, transaction_type, source_id, reference_number,
+            name, memo, debit, credit, currency_code, contact_id, contact_type, contact_name)
+         VALUES ?`, [rows.slice(i, i + 500)]);
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+  console.log(`[QBO Cash GL] Stored ${rows.length} cash-basis ledger lines for userId=${userId} realmId=${realmId}`);
+  return rows.length;
+}
+
 async function syncGeneralLedger(userId, accessToken, realmId, environment) {
   const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const qboReports = require('./quickbooksReportsService');
@@ -754,6 +997,7 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
       name: a.Name || a.FullyQualifiedName || null,
       group,
       code: qbAccountTypeToCode(a.AccountType),
+      subType: a.AccountSubType || null,
       normalSide,
     };
   }
@@ -769,28 +1013,49 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
   for (const [id, m] of Object.entries(acctMap)) classMap[id] = m.normalSide;
   qboReports.applyGlNormalSides(gl, classMap);
 
+  // 2.25) The same report on the Cash basis, for qbo_cash_ledger. Optional: a
+  // failure here leaves the accrual ledger (and every accrual report) intact.
+  let cashGl = null;
+  try {
+    const cashRaw = await qboReports.fetchRawQboReport(realmId, accessToken, environment,
+      'GeneralLedger', { start_date: '1901-01-01', end_date: today, accounting_method: 'Cash', minorversion: MINOR_VERSION });
+    cashGl = qboReports.transformGeneralLedger(cashRaw);
+    qboReports.applyGlNormalSides(cashGl, classMap);
+  } catch (e) {
+    console.warn('[QBO Cash GL] fetch failed, keeping the previous cash ledger:', e.response?.data?.Fault?.Error?.[0]?.Message || e.message);
+  }
+
   // 2.5) Per-row transaction currency (see QBO_GL_TYPE_TO_ENTITY above) — only
-  // fetch the entity types this report actually references. Falls back to the
+  // fetch the entity types these reports actually reference. Falls back to the
   // company's own home currency ONLY when a row's source document can't be
   // matched to one (e.g. Transfers, which QBO doesn't tag with a CurrencyRef
   // at all) — never substituted for a row whose document DOES carry a currency.
+  // The same fetch yields each row's customer/vendor (ledgerContactFor).
   const typesPresent = new Set();
-  for (const r of gl.rows) {
+  for (const r of [...gl.rows, ...(cashGl?.rows || [])]) {
     const entity = QBO_GL_TYPE_TO_ENTITY[r.cells?.type || r.sourceType];
     if (entity) typesPresent.add(entity);
   }
-  const journalEntities = new Map();
-  const currencyMap = await buildQboCurrencyMap(realmId, accessToken, environment, typesPresent, journalEntities);
+  const lineEntities = new Map();
+  const docEntities = new Map();
+  const paidBy = new Map();
+  const currencyMap = await buildQboCurrencyMap(realmId, accessToken, environment, typesPresent,
+    lineEntities, docEntities, paidBy);
+  const nameTypes = await qboNameTypes(userId, realmId, accessToken, environment);
   const [[orgRow]] = await pool.execute(
     'SELECT currency FROM qbo_organizations WHERE user_id = ? AND realm_id = ? LIMIT 1',
     [userId, String(realmId)]
   ).catch(() => [[null]]);
   const homeCurrency = orgRow?.currency || null;
+  const unappliedAccounts = new Set(Object.keys(acctMap)
+    .filter((id) => acctMap[id].subType === 'UnappliedCashBillPaymentExpense'));
+  const ctx = { lineEntities, docEntities, nameTypes, paidBy, unappliedAccounts, currencyMap, homeCurrency };
 
   // 3) Replace existing GL lines (KEEP the AccountBalance snapshot rows from
   //    syncAccounts — they carry transaction_date = NULL / debit = credit = 0 so
   //    the sum-based builders ignore them) and insert the fresh ledger.
   const withMemo = await ensureLedgerMemoColumn();
+  const withContacts = await ensureLedgerContactColumns();
   const conn = await pool.getConnection();
   let n = 0;
   try {
@@ -801,35 +1066,25 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
       [userId, String(realmId)]
     );
     let idx = 0;
-    for (const r of gl.rows) {
-      if (r.isHeader || r.isSubtotal || r.isTotal) continue;
-      const ref = r.accountRef ? String(r.accountRef) : null;
-      if (!ref) continue; // a posting line must belong to an account
-      const date = /^\d{4}-\d{2}-\d{2}/.test(String(r.label || ''))
-        ? String(r.label).slice(0, 10) : null;
-      if (!date) continue; // skip non-dated rows (beginning-balance headers)
-      const debit  = round2(r.cells?.debit);
-      const credit = round2(r.cells?.credit);
-      if (debit === 0 && credit === 0) continue;
+    for (const { r, ref, date, debit, credit, glType, glEntity } of glPostingLines(gl)) {
       const acct  = acctMap[ref] || {};
       const txnId = r.sourceRef ? `qbo:${r.sourceRef}` : `qbo:gl:${idx}`;
-      const glType = r.cells?.type || r.sourceType || null;
-      const glEntity = QBO_GL_TYPE_TO_ENTITY[glType];
       const currencyCode =
         (glEntity && r.sourceRef != null && currencyMap[`${glEntity}:${r.sourceRef}`]) || homeCurrency || null;
+      const who = ledgerContactFor(r, glEntity, ref, debit, credit, ctx);
       // A journal line the report left unnamed takes its real customer/vendor
       // from the JournalEntry itself, never the memo.
       const lineName = r.cells?.name
         || (glEntity === 'JournalEntry' && r.sourceRef != null
-          ? journalEntityFor(journalEntities, r.sourceRef, ref, debit, credit) : null);
+          ? lineEntityFor(lineEntities, `JournalEntry:${r.sourceRef}`, ref, debit, credit)?.name : null);
       await conn.execute(
         `INSERT INTO account_transactions
            (user_id, org_id, platform, transaction_id, account_id, transaction_date,
             account_name, account_group, account_type_code, transaction_details,
             transaction_type, transaction_number, reference_number,
             debit, credit, balance, balance_type,
-            source_type, source_id, line_number, tax_type, tax_amount, currency_code,${withMemo ? ' memo,' : ''} synced_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,${withMemo ? '?,' : ''}NOW())`,
+            source_type, source_id, line_number, tax_type, tax_amount, currency_code,${withMemo ? ' memo,' : ''}${withContacts ? ' contact_id, contact_type, contact_name,' : ''} synced_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,${withMemo ? '?,' : ''}${withContacts ? '?,?,?,' : ''}NOW())`,
         [
           userId, String(realmId), 'quickbooks', txnId, ref, date,
           acct.name || r.cells?.account || null,
@@ -855,6 +1110,7 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
           0,
           currencyCode,
           ...(withMemo ? [r.cells?.memo || ''] : []),
+          ...(withContacts ? [who?.id || null, who?.type || null, who?.name || null] : []),
         ]
       );
       idx += 1; n += 1;
@@ -867,6 +1123,13 @@ async function syncGeneralLedger(userId, accessToken, realmId, environment) {
     conn.release();
   }
   console.log(`[QBO GL] Stored ${n} general-ledger lines in account_transactions for userId=${userId} realmId=${realmId}`);
+  if (cashGl) {
+    try {
+      await storeCashLedger(userId, realmId, cashGl, acctMap, ctx);
+    } catch (e) {
+      console.error('[QBO Cash GL] store failed:', e.message);
+    }
+  }
   return n;
 }
 
@@ -1416,4 +1679,8 @@ module.exports = {
   fetchAllEntities,
   journalEntityFor,
   collectJournalEntities,
+  collectLineEntities,
+  lineEntityFor,
+  docEntity,
+  ledgerContactFor,
 };

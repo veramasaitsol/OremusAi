@@ -26,6 +26,12 @@
  *   - Cash              = money PAID → zb_vendor_payments (bill payments) +
  *                         zb_expenses (direct spend).
  *
+ * QuickBooks (once synced with ledger contacts, db/qbo-ledger-contacts.sql)
+ * follows QuickBooks' own rules instead, on both bases: Accrual reads the GL
+ * in account_transactions, Cash reads QuickBooks' Cash-basis GL
+ * (qbo_cash_ledger), and each expense line goes under its Name only when that
+ * Name is a Vendor — everything else is "Not Specified".
+ *
  * Data note: warehouse bills don't sync sub_total/tax_total (Zoho's bill LIST
  * omits them; only the DETAIL call carries them), so a bill's pre-tax amount
  * falls back to its total when sub_total is 0 — the expense portion ties out
@@ -93,6 +99,7 @@ async function vendorByDocId(userId, orgId, from, to) {
 // report by that Name, so resolve each document to the first line whose
 // details is a real vendor name. Keyed `${source_type}|${source_id}`.
 const CUSTOMER_DOC_TYPES = new Set(['Payment', 'Invoice']);
+const JOURNAL_DOC_TYPES = new Set(['Journal Entry', 'JournalEntry']);
 
 async function qboNameByDoc(userId, orgId, lines) {
   const out = new Map();
@@ -125,6 +132,74 @@ async function qboNameByDoc(userId, orgId, lines) {
     }
   }
   return out;
+}
+
+// QuickBooks counts a purchase document's lines even when they're booked to an
+// income account (a rebate or ATM commission recorded as an Expense, a vendor
+// credit to "Rebates & Incentives"); other income-account activity stays out.
+const PURCHASE_DOC_TYPES = new Set([
+  'Bill', 'Vendor Credit', 'Expense', 'Check', 'Credit Card Expense', 'Credit Card Credit',
+]);
+
+// QuickBooks ledger lines carrying who each line belongs to (contact_type =
+// Vendor | Customer | Employee — see db/qbo-ledger-contacts.sql), or null when
+// the company was synced before those columns existed / the table is missing.
+const QBO_LINE_COLUMNS =
+  `source_id, debit, credit, transaction_date AS dt, reference_number AS ref, account_name AS account,
+   contact_type, contact_name`;
+
+async function qboContactLines(table, userId, orgId, from, to) {
+  try {
+    const [[known]] = await pool.execute(
+      `SELECT 1 AS x FROM ${table} WHERE user_id = ? AND org_id = ? AND contact_type IS NOT NULL LIMIT 1`,
+      [userId, orgId]);
+    if (!known) return null;
+    // qbo_cash_ledger keeps the GL's transaction type only (no source_type)
+    // and its Name and memo apart (no transaction_details).
+    const cols = table === 'account_transactions'
+      ? `COALESCE(transaction_type, source_type) AS ttype, source_type AS stype, transaction_details AS details,
+         NULL AS sub_type`
+      : `transaction_type AS ttype, transaction_type AS stype, COALESCE(NULLIF(memo, ''), name) AS details,
+         account_sub_type AS sub_type`;
+    const [lines] = await pool.execute(
+      `SELECT ${QBO_LINE_COLUMNS}, ${cols}, account_group AS grp
+         FROM ${table}
+        WHERE user_id = ? AND org_id = ? AND account_group IN ('expense', 'income')
+          AND transaction_date BETWEEN ? AND ?`,
+      [userId, orgId, from, to]);
+    return lines.filter((l) => l.grp === 'expense' || PURCHASE_DOC_TYPES.has(String(l.stype || '')));
+  } catch (e) {
+    if (e.code === 'ER_BAD_FIELD_ERROR' || e.code === 'ER_NO_SUCH_TABLE') return null;
+    throw e;
+  }
+}
+
+// QuickBooks groups this report by each expense line's Name, and only a
+// Vendor gets its own row: a line whose payee is a customer or employee, or
+// that has none, is "Not Specified" (a journal line counts under a vendor only
+// when that line itself names one). Exchange gain/loss on a customer's invoice
+// or payment is receivables activity and is left out altogether. So is a
+// vendor payment made before its bill: the Cash-basis GL parks it on the
+// system account "Unapplied Cash Bill Payment Expense" until the bill arrives
+// and the bill then books the real expense — QuickBooks counts only the bill.
+const UNAPPLIED_BILL_PAYMENT = 'UnappliedCashBillPaymentExpense';
+
+function addQboContactLines(map, entries, lines) {
+  for (const l of lines) {
+    if (CUSTOMER_DOC_TYPES.has(String(l.stype || ''))) continue;
+    if (l.sub_type === UNAPPLIED_BILL_PAYMENT && /^Bill Payment/.test(String(l.stype || ''))) continue;
+    const vendor = String(l.contact_type || '').toLowerCase() === 'vendor' && String(l.contact_name || '').trim()
+      ? String(l.contact_name).trim() : 'Not Specified';
+    const amt = num(l.debit) - num(l.credit); // expense accounts run debit-normal
+    if (amt === 0) { if (!map.has(vendor)) map.set(vendor, 0); continue; }
+    addEntry(map, entries, vendor, amt, {
+      name: String(l.details || '').trim() || vendor,
+      account: l.account || '',
+      ref: l.ref || '',
+      date: ymd(l.dt),
+      type: l.ttype || '',
+    });
+  }
 }
 
 function resolveRange(params) {
@@ -184,7 +259,17 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
   const map = new Map();
   const entries = new Map(); // vendor → contributing entries (the row's breakdown)
 
-  if (isCash) {
+  const [[qbo]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
+    .catch(() => [[null]]);
+  // QuickBooks, once synced with ledger contacts: its own Accrual GL, or its
+  // own Cash-basis GL (qbo_cash_ledger), grouped exactly as QuickBooks does.
+  const qboLines = qbo
+    ? await qboContactLines(isCash ? 'qbo_cash_ledger' : 'account_transactions', userId, orgId, from, to)
+    : null;
+
+  if (qboLines) {
+    addQboContactLines(map, entries, qboLines);
+  } else if (isCash) {
     // Cash basis = money paid out.
     await accumulate(map, entries,
       `SELECT vendor_name AS vendor, amount AS amt, date AS dt, payment_number AS ref,
@@ -216,8 +301,6 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
       base
     );
     const docs = await vendorByDocId(userId, orgId, from, to);
-    const [[qbo]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
-      .catch(() => [[null]]);
     const qboNames = qbo ? await qboNameByDoc(userId, orgId, lines) : new Map();
     for (const l of lines) {
       // QuickBooks: exchange gain/loss on a customer's invoice or payment is
@@ -225,7 +308,12 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
       // out of this report.
       if (qbo && CUSTOMER_DOC_TYPES.has(String(l.stype || ''))) continue;
       const key = String(l.source_id || '').trim().toLowerCase();
-      const vendor = docs.get(key) || qboNames.get(`${l.stype}|${key}`) || 'Not Specified';
+      // QuickBooks synced before ledger contacts: the ledger can't tell a
+      // journal line's own vendor from its memo, so journals go to "Not
+      // Specified" (resync to attribute the few that name a vendor).
+      const vendor = (qbo && JOURNAL_DOC_TYPES.has(String(l.stype || '')))
+        ? 'Not Specified'
+        : docs.get(key) || qboNames.get(`${l.stype}|${key}`) || 'Not Specified';
       const amt = num(l.debit) - num(l.credit); // expense accounts run debit-normal
       if (amt === 0) { if (!map.has(vendor)) map.set(vendor, 0); continue; } // keep the row, skip the ₹0 entry
       addEntry(map, entries, vendor, amt, {
@@ -270,7 +358,7 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
       from,
       to,
       basis: isCash ? 'Cash' : 'Accrual',
-      source: isCash ? 'warehouse' : 'ledger',
+      source: isCash && !qboLines ? 'warehouse' : 'ledger',
     },
   };
 }
