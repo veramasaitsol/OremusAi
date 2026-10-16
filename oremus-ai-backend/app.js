@@ -34,7 +34,8 @@ const reportExportRoutes = require('./routes/reportExport');
 const settingsRoutes     = require('./routes/settings');
 const webhooksRoutes     = require('./routes/webhooks');
 const notificationsRoutes = require('./routes/notifications');
-const pool               = require('./config/db');
+const appVersionRoutes   = require('./routes/appVersion');
+const pool              = require('./config/db');
 
 const app  = express();
 const PORT = process.env.PORT || 5001;
@@ -58,7 +59,7 @@ const ALLOWED_ORIGINS = [
   'https://www.daybook.vensframe.com',
   'https://oremusai.veramasa.com',
   'https://oremusui.vensframe.com',
-  'http://122.175.56.137:8000/api/v1/query',
+  'https://aiapi.oremuscorp.ai/api/v1/query',
   'http://122.175.56.137:8000',
   'https://122.175.56.137:8000/api/v1/query',
   'https://122.175.56.137:8000',
@@ -118,6 +119,8 @@ app.use('/api/settings',     settingsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 // PUBLIC (no JWT — providers post here; authenticity via shared secret).
 app.use('/api/webhooks',     webhooksRoutes);
+// PUBLIC (no JWT) — mobile app update check.
+app.use('/app-version',      appVersionRoutes);
 app.use('/api/v1', aiQueryRoutes);
 app.use('/api/v1', aiFeedbackRoutes);
 // ── Health check ───────────────────────────────────────────────────────────────

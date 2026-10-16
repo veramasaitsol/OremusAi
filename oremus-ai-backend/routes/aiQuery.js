@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const AI_BACKEND_URL = 'http://122.175.56.137:8000/api/v1/query';
+const AI_BACKEND_URL = 'https://aiapi.oremuscorp.ai/api/v1/query';
 
 async function queryAi(req, res) {
     console.log("Inside");
