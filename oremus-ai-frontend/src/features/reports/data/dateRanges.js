@@ -38,6 +38,25 @@ export const AS_OF_REPORT_NAMES = new Set([
   'Vendor Balance Detail', 'Chart of Accounts',
 ]);
 
+// Within AS_OF_REPORT_NAMES, the reports that show ONLY the as-of date — no
+// From box, and reportsSlice never sends them a from_date, so each always
+// covers everything from the start of the books up to the as-of date. (Picking
+// an as-of date switches the filters to a custom range, which seeds From from
+// the preset on screen — e.g. 2025-01-01 — so without this a leftover From
+// would silently drop every older open bill.)
+//
+// The Balance Sheet keeps its optional From: blank for the cumulative
+// position, or set to switch to a period-movement view over [From, To]
+// (backend `bs_from`). AR Aging Summary also keeps it: its backend
+// (salesArFromInvoicesService.buildArAgingSummary) narrows which invoices are
+// considered by issue date while the balance still runs as of the To date.
+export const AS_OF_NO_FROM_REPORT_NAMES = new Set([
+  'AR Aging Detail', 'A/R Aging Detail', 'Aged Receivables Detail',
+  'AP Aging Summary', 'A/P Aging Summary', 'Aged Payables Summary',
+  'AP Aging Detail', 'A/P Aging Detail', 'Aged Payables Detail',
+  'Vendor Balance Detail', 'Chart of Accounts',
+]);
+
 export const DATE_PRESETS = [
   ['this-fiscal-year',     'This fiscal year'],
   ['previous-fiscal-year', 'Previous fiscal year'],

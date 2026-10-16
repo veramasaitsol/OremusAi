@@ -5,7 +5,7 @@ import {
   CUSTOM_REPORTS, DRAFT_REPORTS, PUBLISHED_REPORTS, ARCHIVED_REPORTS,
 } from './data/savedReports.js';
 import { fetchReportData, fetchCurrencies } from './reportsAPI.js';
-import { resolvePresetRange, DEFAULT_DATE_RANGE, AS_OF_REPORT_NAMES, todayYmd } from './data/dateRanges.js';
+import { resolvePresetRange, DEFAULT_DATE_RANGE, AS_OF_REPORT_NAMES, AS_OF_NO_FROM_REPORT_NAMES, todayYmd } from './data/dateRanges.js';
 
 // Resolve the on-screen date-range preset + compare config from state into the
 // concrete filter object the backend expects. Shared by the report viewer
@@ -35,18 +35,21 @@ function resolveReportFilters(reportsState, filters, reportName) {
   // has actually picked a date (dateRange becomes 'custom'), their choice is
   // honoured as-is; only the untouched default is forced to today, matching
   // how Balance Sheet / Aging / Vendor Balance behave on every platform.
-  // Deliberately NOT setting `from_date` here (only `to_date`): a couple of
-  // these reports (AR Aging Summary, Vendor Balance Detail) now give
-  // `from_date` real meaning — it narrows which documents are considered by
-  // issue date — so forcing it to "today" by default would silently exclude
-  // every document dated before today until the user touched the From box,
-  // showing an empty report on first load. Omitting it lets each backend's
-  // own default (no filter = show everything up to the as-of date) apply
-  // until the user deliberately sets a From date.
+  // Deliberately NOT setting `from_date` here (only `to_date`): AR Aging
+  // Summary gives `from_date` real meaning — it narrows which invoices are
+  // considered by issue date — so forcing it to "today" by default would
+  // silently exclude every invoice dated before today until the user touched
+  // the From box, showing an empty report on first load. Omitting it lets each
+  // backend's own default (no filter = show everything up to the as-of date)
+  // apply until the user deliberately sets a From date.
   if (reportName && AS_OF_REPORT_NAMES.has(reportName) && f.dateRange !== 'custom') {
     resolved = { ...resolved, to_date: todayYmd() };
     delete resolved.from_date;
   }
+  // As-of-only reports (no From box) always run from the start of the books
+  // to the as-of date — never with the From that picking a custom as-of date
+  // seeds from the previous preset (setFilter).
+  if (reportName && AS_OF_NO_FROM_REPORT_NAMES.has(reportName)) delete resolved.from_date;
   // Balance Sheet: send `bs_from` only when the user picked an explicit From
   // date. It shifts the Current-Year-Earnings boundary; balances stay as-of To.
   if (reportName && BALANCE_SHEET_REPORTS.has(reportName) && f.customFrom) {

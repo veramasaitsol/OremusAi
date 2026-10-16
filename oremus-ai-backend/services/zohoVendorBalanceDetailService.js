@@ -34,6 +34,10 @@ function num(v) {
 
 const round2 = (n) => Math.round((num(n) + Number.EPSILON) * 100) / 100;
 
+// "As of" far enough ahead to count every application made so far — the same
+// sentinel the A/P reconciliation uses for today's open items.
+const QBO_OPEN_TODAY = new Date(9999, 11, 31);
+
 // MM/DD/YYYY (the QuickBooks report layout's date format)
 function fmtDateUS(d) {
   if (!d) return '';
@@ -91,16 +95,20 @@ async function buildVendorBalanceDetail(userId, params = {}) {
     [userId, orgId]
   );
 
-  await attachAsOfBillBalances(bills, userId, orgId, asOf);
-  await convertXeroBillsToBase(bills, orgId);
-
-  const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
-
   // QuickBooks' own layout: Amount (the transaction), Open balance (what's
   // still owed on it) and Balance (the vendor's running total of open balances
   // in date order). Other platforms keep the single per-document Balance.
   const [[qbo]] = await pool.execute('SELECT 1 AS x FROM qbo_organizations WHERE realm_id = ? LIMIT 1', [String(orgId)])
     .catch(() => [[null]]);
+
+  // QuickBooks prints every transaction dated on or before the report date at
+  // its open balance TODAY (a bill dated before the date but paid after it is
+  // left out) — unlike its A/P Aging, which rewinds balances to the date.
+  await attachAsOfBillBalances(bills, userId, orgId, qbo ? QBO_OPEN_TODAY : asOf);
+  await convertXeroBillsToBase(bills, orgId);
+
+  const currency = bills.find((r) => r.currency_code)?.currency_code || 'INR';
+
   if (qbo) return buildQboLayout(bills, userId, orgId, asOf, fromDate, currency);
 
   const columns = [
@@ -215,12 +223,12 @@ async function buildVendorBalanceDetail(userId, params = {}) {
 }
 
 // ── QuickBooks layout ───────────────────────────────────────────────────────
-// Every transaction still open on the as-of date, per vendor: bills with an
-// open balance, and the unapplied expenses / vendor credits / journal entries /
-// bill payments that debited A/P (see qboVendorReconciliation). Amount is the
-// transaction's full signed value, Open balance its unapplied part, and Balance
-// the running sum of open balances in date order — so each vendor's last
-// Balance is its balance on the as-of date, and the grand total the A/P total.
+// Every transaction dated on or before the report date that is still open
+// today, per vendor: bills with an open balance, and the unapplied expenses /
+// vendor credits / journal entries / bill payments that debited A/P (see
+// qboVendorReconciliation). Amount is the transaction's full signed value,
+// Open balance its unapplied part today, and Balance the running sum of open
+// balances in date order. Bill balances arrive already computed for today.
 async function buildQboLayout(bills, userId, orgId, asOf, fromDate, currency) {
   const columns = [
     { key: 'label',   label: 'Date',             align: 'left'  },
@@ -249,9 +257,10 @@ async function buildQboLayout(bills, userId, orgId, asOf, fromDate, currency) {
       dueDate: fmtDateUS(bill.due_date || bill.date),
       amount: num(bill.total),
       open: num(bill._balanceAsOf),
+      txnId: bill.qbo_id,
     });
   }
-  for (const c of await fetchUnallocatedVendorCredits(userId, orgId, asOf)) {
+  for (const c of await fetchUnallocatedVendorCredits(userId, orgId, QBO_OPEN_TODAY)) {
     if (!inWindow(c.date)) continue;
     push(c.vendor, {
       date: c.date,
@@ -260,6 +269,7 @@ async function buildQboLayout(bills, userId, orgId, asOf, fromDate, currency) {
       dueDate: '',
       amount: c.total != null ? num(c.total) : num(c.amount),
       open: num(c.amount),
+      txnId: String(c.key || '').split('|')[1], // `${type}|${source_id}|…`
     });
   }
 
@@ -270,11 +280,15 @@ async function buildQboLayout(bills, userId, orgId, asOf, fromDate, currency) {
   const rows = [];
   let grandAmount = 0;
   let grandOpen = 0;
+  // Same-day transactions in QuickBooks' order: by transaction id (QuickBooks
+  // numbers every transaction from one sequence), which drives the running
+  // Balance between them.
+  const txnOrder = (d) => (Number.isFinite(Number(d.txnId)) && d.txnId !== '' ? Number(d.txnId) : Infinity);
   for (const vendor of [...byVendor.keys()].sort((a, b) => a.localeCompare(b))) {
     const docs = byVendor.get(vendor)
       .map((d, i) => ({ ...d, _i: i }))
       .sort((a, b) => ymd(a.date).localeCompare(ymd(b.date))
-        || String(a.num).localeCompare(String(b.num), undefined, { numeric: true }) || a._i - b._i);
+        || txnOrder(a) - txnOrder(b) || a._i - b._i);
     rows.push({ label: vendor, isHeader: true, level: 0, cells: {} });
     let running = 0;
     let vendorAmount = 0;

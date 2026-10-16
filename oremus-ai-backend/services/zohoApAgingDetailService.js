@@ -698,26 +698,6 @@ async function computeQboExactOpenItems(userId, orgId, asOf, asOfEnd, ctx) {
 
   const { canonOf, displayName, bills, billVendorByQboId, expenseVendorByQboId } = ctx;
   const day = fmtDate(asOfEnd).split('/').reverse().join('-'); // YYYY-MM-DD
-  const applied = new Map();     // `${type}:${id}` → amount applied on/before the as-of date
-  const paymentNet = new Map();  // payment id → { total, applied (bills − credits) }
-  for (const l of links) {
-    if (!l.d || l.d > day) continue;
-    const isBill = l.target_type === 'Bill';
-    if (l.target_type !== 'None') {
-      const k = `${l.target_type}:${l.target_id}`;
-      applied.set(k, (applied.get(k) || 0) + num(l.amount));
-    }
-    const p = paymentNet.get(l.payment_id) || { total: num(l.payment_total), applied: 0 };
-    p.applied += l.target_type === 'None' ? 0 : (isBill ? num(l.amount) : -num(l.amount));
-    paymentNet.set(l.payment_id, p);
-  }
-
-  // Bills: open = total − payments applied on/before the as-of date.
-  const billBalance = new Map();
-  for (const b of bills) {
-    if (!b.qbo_id) continue;
-    billBalance.set(String(b.qbo_id), round2(num(b.total) - (applied.get(`Bill:${b.qbo_id}`) || 0)));
-  }
 
   const [docs] = await pool.execute(
     `SELECT source_type, source_id, reference_number, transaction_details,
@@ -728,6 +708,36 @@ async function computeQboExactOpenItems(userId, orgId, asOf, asOfEnd, ctx) {
       GROUP BY source_type, source_id, reference_number, transaction_details`,
     [userId, orgId, `${day} 23:59:59`]
   );
+  // Which side of A/P each linkable document sits on: a payment PAYS what
+  // credited A/P (bills, and journal entries or deposits that raise what's
+  // owed) and USES what debited it (vendor credits, …).
+  const apNet = new Map();
+  for (const d of docs) {
+    const linkType = QBO_LINK_TYPE[String(d.source_type || '')];
+    if (!linkType) continue;
+    const k = `${linkType}:${String(d.source_id || '')}`;
+    apNet.set(k, (apNet.get(k) || 0) + num(d.net));
+  }
+
+  const applied = new Map();     // `${type}:${id}` → amount applied on/before the as-of date
+  const paymentNet = new Map();  // payment id → { total, applied (charges paid − credits used) }
+  for (const l of links) {
+    if (!l.d || l.d > day) continue;
+    const k = `${l.target_type}:${l.target_id}`;
+    const pays = l.target_type === 'Bill' || (apNet.get(k) || 0) > 0.005;
+    if (l.target_type !== 'None') applied.set(k, (applied.get(k) || 0) + num(l.amount));
+    const p = paymentNet.get(l.payment_id) || { total: num(l.payment_total), applied: 0 };
+    p.applied += l.target_type === 'None' ? 0 : (pays ? num(l.amount) : -num(l.amount));
+    paymentNet.set(l.payment_id, p);
+  }
+
+  // Bills: open = total − payments applied on/before the as-of date.
+  const billBalance = new Map();
+  for (const b of bills) {
+    if (!b.qbo_id) continue;
+    billBalance.set(String(b.qbo_id), round2(num(b.total) - (applied.get(`Bill:${b.qbo_id}`) || 0)));
+  }
+
   const items = [];
   for (const d of docs) {
     const type = String(d.source_type || '');

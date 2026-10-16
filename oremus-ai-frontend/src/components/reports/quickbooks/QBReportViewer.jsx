@@ -27,7 +27,7 @@ import {
   saveAsCustom, loadCurrencies,
 } from '../../../features/reports/reportsSlice.js';
 import { selectActiveClient } from '../../../features/clients/clientsSlice.js';
-import { dateLabel, resolvePresetRange, AS_OF_REPORT_NAMES, todayYmd } from '../../../features/reports/data/dateRanges.js';
+import { dateLabel, resolvePresetRange, AS_OF_REPORT_NAMES, AS_OF_NO_FROM_REPORT_NAMES, todayYmd } from '../../../features/reports/data/dateRanges.js';
 import { cn } from '../../../utils/classNames.js';
 
 // QuickBooks brand green used for primary actions.
@@ -184,30 +184,10 @@ function effectiveAsOf(filters, reportName) {
   return filters.customTo || r.to_date;
 }
 
-// Within AS_OF_REPORTS, only the Balance Sheet carries `accountRef` rows that
-// support an account-drill, whose "Beginning Balance" opening row is what the
-// From date actually scopes. The other aging/list reports below are pure
-// point-in-time snapshots whose backend builders resolve only an as-of date
-// and ignore From entirely, and their rows have no accountRef to drill — so a
-// From box there is a no-op that just confuses the filter.
-const AS_OF_NO_FROM_REPORTS = new Set([
-  // A Balance Sheet is cumulative to the "To" date by default. Its "From" box is
-  // optional: leave it blank for the cumulative position, or set it to switch to
-  // a period-movement view over [From, To] (backend `bs_from`). So the box is
-  // shown for the Balance Sheet and only hidden for the aging snapshots below.
-  //
-  // AR Aging Summary and Vendor Balance Detail are exceptions among the aging/
-  // list reports: their backends (salesArFromInvoicesService.buildArAgingSummary,
-  // zohoVendorBalanceDetailService.buildVendorBalanceDetail) DO honour an
-  // optional `from_date` — it narrows which invoices/bills are considered by
-  // issue date (e.g. "only bills raised since April"), while the balance
-  // itself still runs as of the "To" date. So they're deliberately left OUT
-  // of this set (From shown).
-  'AR Aging Detail', 'A/R Aging Detail', 'Aged Receivables Detail',
-  'AP Aging Summary', 'A/P Aging Summary', 'Aged Payables Summary',
-  'AP Aging Detail', 'A/P Aging Detail', 'Aged Payables Detail',
-  'Chart of Accounts',
-]);
+// As-of reports that show only the as-of date, no From box — canonical list in
+// dateRanges.js (AS_OF_NO_FROM_REPORT_NAMES), shared with reportsSlice, which
+// never sends these reports a from_date.
+const AS_OF_NO_FROM_REPORTS = AS_OF_NO_FROM_REPORT_NAMES;
 
 // Contact / list reports have no period at all — QuickBooks shows only the
 // company + report name (no third date line).
