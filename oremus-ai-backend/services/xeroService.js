@@ -398,7 +398,7 @@ async function syncCustomers(userId, accessToken, tenantId) {
   const now = new Date();
   const rows = contacts.map((c) => {
     const email = c.EmailAddress || null;
-    const phone = c.Phones?.find?.((p) => p.PhoneNumber)?.PhoneNumber || null;
+    const phone = xeroPhone(c.Phones);
     // customers.zoho_id is NOT NULL UNIQUE — synthesize a non-colliding value
     return [
       userId, tenantId, `xero:${c.ContactID}`, c.ContactID,
@@ -437,10 +437,15 @@ async function syncCustomers(userId, accessToken, tenantId) {
 // Flatten a Xero Address into the single line the contact reports print. Xero
 // keeps a STREET and a POBOX address per contact; the street one is the billing
 // address a supplier invoice is addressed to.
+// A contact's billing address: Xero's postal address (POBOX) — the one its
+// invoices and bills print, and QuickBooks' BillAddr equivalent — else the
+// street address, else any address it has.
 function xeroAddress(addresses) {
   const list = Array.isArray(addresses) ? addresses : [];
-  const a = list.find((x) => x.AddressType === 'STREET' && (x.AddressLine1 || x.City))
-    || list.find((x) => x.AddressLine1 || x.City);
+  const has = (x) => x.AddressLine1 || x.City;
+  const a = list.find((x) => x.AddressType === 'POBOX' && has(x))
+    || list.find((x) => x.AddressType === 'STREET' && has(x))
+    || list.find(has);
   if (!a) return null;
   const parts = [
     a.AddressLine1, a.AddressLine2, a.AddressLine3, a.AddressLine4,
@@ -449,18 +454,33 @@ function xeroAddress(addresses) {
   return parts.length ? parts.join(' ') : null;
 }
 
+// A contact's primary phone, the way QuickBooks keeps one (PrimaryPhone): the
+// default number, else mobile, direct dial, fax — with its country and area
+// code, which Xero stores in separate fields ("+91 40 23456789").
+const XERO_PHONE_ORDER = ['DEFAULT', 'MOBILE', 'DDI', 'FAX'];
+function xeroPhone(phones) {
+  const list = (Array.isArray(phones) ? phones : []).filter((p) => String(p?.PhoneNumber ?? '').trim());
+  const p = XERO_PHONE_ORDER.map((t) => list.find((x) => x.PhoneType === t)).find(Boolean) || list[0];
+  if (!p) return null;
+  const country = String(p.PhoneCountryCode ?? '').trim().replace(/^\+/, '');
+  return [country && `+${country}`, p.PhoneAreaCode, p.PhoneNumber]
+    .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
+}
+
 // ── Sync vendors (Contacts where IsSupplier=true) ────────────────────────────
 async function syncVendors(userId, accessToken, tenantId) {
   const contacts = await xeroGetAllPages(
     `${XERO_API_BASE}/Contacts`, xeroHeaders(accessToken, tenantId),
-    { where: 'IsSupplier==true' }, 'Contacts'
+    // Archived suppliers too, so one archived in Xero after we first synced it
+    // turns inactive here instead of staying active for ever.
+    { where: 'IsSupplier==true', includeArchived: true }, 'Contacts'
   );
   if (contacts.length === 0) return 0;
 
   const now = new Date();
   const rows = contacts.map((v) => {
     const email = v.EmailAddress || null;
-    const phone = v.Phones?.find?.((p) => p.PhoneNumber)?.PhoneNumber || null;
+    const phone = xeroPhone(v.Phones);
     const fullName = [v.FirstName, v.LastName]
       .map((p) => String(p ?? '').trim()).filter(Boolean).join(' ') || null;
     return [
@@ -1094,6 +1114,8 @@ async function syncAllXeroData(userId, accessToken, tenantId, { run = null } = {
 }
 
 module.exports = {
+  xeroPhone,
+  xeroAddress,
   XERO_AUTH_URL,
   XERO_TOKEN_URL,
   XERO_REVOKE_URL,

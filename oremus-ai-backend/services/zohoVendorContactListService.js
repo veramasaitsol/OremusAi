@@ -21,6 +21,12 @@
  * A column a platform does not keep stays blank rather than being invented —
  * Zoho and Xero have no 1099 flag (it is a US filing concept), so "Track 1099"
  * only prints for QuickBooks.
+ *
+ * Xero has no such report; it gets QuickBooks' list of ACTIVE vendors (Xero's
+ * suppliers, archived ones left out as QuickBooks leaves out inactive
+ * vendors), without the Track 1099 column it can never fill, and with
+ * Company blank where it only repeats the contact's name — a Xero contact IS
+ * the organisation and has no separate company field.
  */
 
 const pool = require('../config/db');
@@ -38,17 +44,21 @@ async function buildVendorContactList(userId, params = {}) {
     throw err;
   }
 
+  const [[xero]] = await pool.execute('SELECT 1 AS x FROM xero_organizations WHERE tenant_id = ? LIMIT 1', [String(orgId)])
+    .catch(() => [[null]]);
+
   const [rows] = await pool.execute(
     `SELECT contact_name, company_name, phone, email, full_name,
             billing_address, account_number, gst_no, track_1099
        FROM vendors
       WHERE user_id = ? AND org_id = ? AND COALESCE(is_deleted, 0) = 0
         AND COALESCE(NULLIF(contact_type, ''), 'vendor') = 'vendor'
+        ${xero ? "AND COALESCE(status, 'active') = 'active'" : ''}
       ORDER BY contact_name`,
     [userId, orgId]
   );
 
-  const columns = [
+  const allColumns = [
     { key: 'label',    label: 'Vendor',        align: 'left' },
     { key: 'company',  label: 'Company',       align: 'left' },
     { key: 'phone',    label: 'Phone numbers', align: 'left' },
@@ -59,13 +69,15 @@ async function buildVendorContactList(userId, params = {}) {
     { key: 'taxId',    label: 'Tax ID',        align: 'left' },
     { key: 'track1099', label: 'Track 1099',   align: 'left' },
   ];
+  const columns = xero ? allColumns.filter((c) => c.key !== 'track1099') : allColumns;
+  const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 
   const out = rows.map((r) => ({
     label: r.contact_name || '(Unnamed)',
     level: 0,
     alwaysShow: true,
     cells: {
-      company:  r.company_name || '',
+      company:  xero && sameName(r.company_name, r.contact_name) ? '' : (r.company_name || ''),
       phone:    r.phone || '',
       email:    r.email || '',
       // QuickBooks falls back to the display name when a vendor has no
