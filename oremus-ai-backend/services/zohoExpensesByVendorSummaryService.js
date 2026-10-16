@@ -32,6 +32,10 @@
  * (qbo_cash_ledger), and each expense line goes under its Name only when that
  * Name is a Vendor — everything else is "Not Specified".
  *
+ * Xero has no such report; it gets the same QuickBooks rules from the contact
+ * Xero stamps on every ledger line, with a cash basis rebuilt from payment and
+ * allocation dates (see xeroExpensesByVendor).
+ *
  * Data note: warehouse bills don't sync sub_total/tax_total (Zoho's bill LIST
  * omits them; only the DETAIL call carries them), so a bill's pre-tax amount
  * falls back to its total when sub_total is 0 — the expense portion ties out
@@ -40,6 +44,7 @@
 
 const pool = require('../config/db');
 const { getBaseCurrency } = require('./zohoChartOfAccountsService');
+const { xeroExpenseEntries } = require('./xeroExpensesByVendor');
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -266,9 +271,22 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
   const qboLines = qbo
     ? await qboContactLines(isCash ? 'qbo_cash_ledger' : 'account_transactions', userId, orgId, from, to)
     : null;
+  const [[xero]] = qbo ? [[null]]
+    : await pool.execute('SELECT 1 AS x FROM xero_organizations WHERE tenant_id = ? LIMIT 1', [String(orgId)])
+      .catch(() => [[null]]);
+  let note;
 
   if (qboLines) {
     addQboContactLines(map, entries, qboLines);
+  } else if (xero) {
+    const res = await xeroExpenseEntries(userId, orgId, from, to, { cash: isCash });
+    for (const e of res.entries) {
+      if (e.amount === 0) { if (!map.has(e.vendor)) map.set(e.vendor, 0); continue; } // keep the row, skip the ₹0 entry
+      addEntry(map, entries, e.vendor, e.amount, e.entry);
+    }
+    if (isCash && !res.allocationsSynced) {
+      note = 'Bills settled by a credit note or overpayment are not included until Xero allocations are synced.';
+    }
   } else if (isCash) {
     // Cash basis = money paid out.
     await accumulate(map, entries,
@@ -358,7 +376,8 @@ async function buildExpensesByVendorSummary(userId, params = {}) {
       from,
       to,
       basis: isCash ? 'Cash' : 'Accrual',
-      source: isCash && !qboLines ? 'warehouse' : 'ledger',
+      source: isCash && !qboLines && !xero ? 'warehouse' : 'ledger',
+      ...(note ? { note } : {}),
     },
   };
 }
