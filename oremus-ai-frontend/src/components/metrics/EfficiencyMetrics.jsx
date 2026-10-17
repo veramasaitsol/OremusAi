@@ -90,7 +90,7 @@ export default function EfficiencyMetrics({ from, to }) {
         <MiniKpi label="AP Days"  value={`${apDays} days`} sub="pay vendors"          color="#F59E0B" icon={Calendar} isText />
         <MiniKpi label="Cash Conversion" value={`${ccc} days`} sub="DSO − DPO" color="#06B6D4" icon={RefreshCw} isText />
         <MiniKpi label="Return on Equity" value={data.roe == null ? '—' : `${data.roe}%`} sub="net profit ÷ equity" color="#8B5CF6" icon={Percent} isText />
-        <MiniKpi label="Cost to Income"  value={data.costToIncome == null ? '—' : `${data.costToIncome}%`} sub="expenses ÷ revenue" color="#2563EB" icon={Percent} isText />
+        <MiniKpi label="Cost to Income"  value={data.costToIncome == null ? '—' : `${data.costToIncome}%`} sub="(cost of sales + opex) ÷ revenue" color="#2563EB" icon={Percent} isText />
         <MiniKpi label="Total Payables"  value={data.payables || 0} sub="outstanding AP" color="#EF4444" icon={ReceiptText} />
       </div>
 

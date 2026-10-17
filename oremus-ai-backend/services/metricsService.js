@@ -941,16 +941,20 @@ async function getCashflowMetrics(ctx, params, opts = {}) {
     meta.warnings.push(cf
       ? 'No prior-period balance to compare against yet; showing bank inflow/outflow only.'
       : `Cash flow figures unavailable for ${provider}; showing bank inflow/outflow only.`);
+    // Net Change is still closing − opening cash: with no books before the
+    // period the opening cash was nothing (cf.netChange = closing cash). The
+    // invoice/expense proxy in `flows` is not a cash movement at all.
+    const netChange = cf && cf.netChange != null ? cf.netChange : flows.net;
     return {
       operatingCashFlow: null,
       investingCashFlow: null,
       financingCashFlow: null,
-      netChange: flows.net,
+      netChange,
       capex: null,
       freeCashFlow: null,
       inflow,
       outflow,
-      net: flows.net,
+      net: netChange,
       currency: conn.currency,
       _meta: meta,
     };

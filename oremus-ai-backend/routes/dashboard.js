@@ -376,6 +376,17 @@ async function resolveCashOnHand(av, uid, activeOrgId, asOf) {
     const ledgerUid = av.hasQbo ? av.qboUid : (av.hasXero ? av.xeroUid : uid);
     const ledgerAccounts = await fromAccountLedger(ledgerUid);
     if (ledgerAccounts.length > 0) return pack(ledgerAccounts);
+    // A date before the company's books begin had no cash at all. Falling
+    // through to the chart-of-accounts snapshots below would print TODAY's
+    // balance for it — e.g. a "−46% vs last year" against a year with no
+    // transactions.
+    if (asOf) {
+      const [first] = await safeQuery(
+        `SELECT MIN(transaction_date) AS d FROM account_transactions WHERE user_id=?${orgF}`,
+        [ledgerUid, ...orgP]
+      );
+      if (first?.d && String(first.d).slice(0, 10) > String(asOf).slice(0, 10)) return pack([]);
+    }
   }
 
   // 3. Legacy bank ledger (no Zoho token, but bank rows exist).
@@ -1739,6 +1750,7 @@ router.get('/profitability', async (req, res) => {
       revenue  = Math.round(parseFloat(revRow?.v || 0));
     }
 
+    let plNetProfit = null;
     // Total Expenses = Operating Expense + Non-Operating Expense (excludes
     // COGS, per spec — moot today since every current client has COGS=0, a
     // services business) — sourced from the P&L engine's own canonical
@@ -1765,10 +1777,16 @@ router.get('/profitability', async (req, res) => {
       if (plEffUid && plOrgId) {
         const pl = await computePLFigures(plEffUid, plOrgId, null, from, to);
         expenses = Math.round(pl.opex + pl.otherExpense);
+        // Revenue from the same P&L, net of refunds / credit notes / reversals.
+        // The branch queries above sum every GROSS credit to an income account,
+        // which overstated revenue (2,054,820 read as 3,069,229 for one client)
+        // and understated the Expense Ratio built on it.
+        revenue = Math.round(pl.revenue);
+        plNetProfit = Math.round(pl.netProfit);
       }
     } catch (_) { /* keep the branch-computed `expenses` above */ }
 
-    const netProfit   = revenue - expenses;
+    const netProfit   = plNetProfit != null ? plNetProfit : revenue - expenses;
     const expenseRatio = revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(2)) : 0;
     const netMargin    = revenue > 0 ? parseFloat(((netProfit / revenue) * 100).toFixed(2)) : 0;
 
@@ -1954,6 +1972,7 @@ router.get('/efficiency', async (req, res) => {
     let openingReceivables = null; // AR the day before `from` (informational)
     let openingPayables = null;    // AP the day before `from` (informational)
     let operatingExpenses = null;  // P&L Operating Expense for the period
+    let costOfSales = null;        // P&L Cost of Goods Sold / cost of services
     let otherExpenses = null;      // P&L Non-Operating / Other Expense for the period
     let netProfit = null;          // P&L Net Profit for the period (ROE numerator)
     let totalEquity = null;        // Balance Sheet Total Equity as of `to` (ROE denominator)
@@ -1982,6 +2001,7 @@ router.get('/efficiency', async (req, res) => {
         const { raw } = await computeKeyRatios(ctxUid, agingOrgId, ctxPlatform, from, to,
           await getFyStartMonth(uid, ctxPlatform));
         revenue           = Number(raw.revenue) || 0;
+        costOfSales       = Number(raw.cogs) || 0;
         operatingExpenses = Number(raw.opex) || 0;
         otherExpenses     = Number(raw.otherExpense) || 0;
         // Total expenses for AP Days = Operating + Non-Operating (excludes COGS).
@@ -1991,7 +2011,8 @@ router.get('/efficiency', async (req, res) => {
         totalLiabilities  = Math.abs(Number(raw.totalLiabilities) || 0);
         totalEquity       = Number(raw.totalEquity) || 0;
         // Balance Sheet closing AR / AP as of `to`.
-        receivablesAsOf   = Math.abs(Number(raw.accountsReceivable) || 0);
+        // A credit balance on receivables isn't days of collection (→ 0 days).
+        receivablesAsOf   = Math.max(0, Number(raw.accountsReceivable) || 0);
         payablesAsOf      = Math.abs(Number(raw.accountsPayable) || 0);
         openingReceivables = raw.openingAccountsReceivable == null ? null : Number(raw.openingAccountsReceivable) || 0;
         openingPayables    = raw.openingAccountsPayable == null ? null : Math.abs(Number(raw.openingAccountsPayable) || 0);
@@ -2024,6 +2045,7 @@ router.get('/efficiency', async (req, res) => {
         // Peel operating revenue back out for AR Days.
         const otherIncome = Number(pl.otherIncome) || 0;
         revenue = Math.max(0, (Number(pl.revenue) || 0) - otherIncome);
+        costOfSales = Number(pl.cogs) || 0;
         operatingExpenses = Number(pl.opex) || 0;
         otherExpenses = Number(pl.otherExpense) || 0;
         expenses = operatingExpenses + otherExpenses;
@@ -2070,7 +2092,11 @@ router.get('/efficiency', async (req, res) => {
       : null;
 
     // ── Cost to Income ratio (period) ─────────────────────────────────────────
-    const costToIncome = revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(2)) : null;
+    // (Cost of services + Operating expenses) ÷ Revenue × 100 — the cost of
+    // earning the revenue. (Total expenses ÷ revenue is the Expense Ratio.)
+    const costToIncome = revenue > 0 && operatingExpenses != null
+      ? parseFloat((((Number(costOfSales) || 0) + operatingExpenses) / revenue * 100).toFixed(2))
+      : (revenue > 0 ? parseFloat(((expenses / revenue) * 100).toFixed(2)) : null);
 
     // ── AR / AP ageing buckets ────────────────────────────────────────────────
     // Reuses the SAME point-in-time engine as the "AR Aging Summary" / "AP

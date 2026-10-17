@@ -209,17 +209,17 @@ function buildConfigs(data, currency = 'INR') {
       category: 'Liquidity Ratios',
       label: 'Cash flow ratio',
       value: data.cashFlowRatio,
-      // Stored as a percent (OCF ÷ Current Liabilities × 100). A healthy
-      // cover of liabilities once over is ~100%; 80% is a soft warning.
-      min: -50, max: 200,
-      benchmarks: [{ value: 80, label: '80%' }, { value: 100, label: '100%' }],
-      color: colorHigher(100, 80)(data.cashFlowRatio),
-      fmt: pct, fmtAxis: pctA,
+      // A plain multiple (OCF ÷ Current Liabilities), like the Current Ratio.
+      // Covering liabilities once over is 1.0; below 0.8 is a soft warning.
+      min: -0.5, max: 2,
+      benchmarks: [{ value: 0.8, label: '0.8' }, { value: 1, label: '1' }],
+      color: colorHigher(1, 0.8)(data.cashFlowRatio),
+      fmt: ratio, fmtAxis: ratio,
       formula: 'Operating Cash Flow / Current Liabilities',
       interpretations: [
-        '> 100%: cash flow covers current liabilities at least once',
-        '< 80%: income may not cover obligations',
-        'Shows what % of current liabilities operating cash flow covers',
+        '> 1: cash flow covers current liabilities at least once',
+        '< 0.8: income may not cover obligations',
+        'Shows how many times operating cash flow covers current liabilities',
       ],
     },
     {

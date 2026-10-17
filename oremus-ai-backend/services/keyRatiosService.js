@@ -78,6 +78,19 @@ const RE_DEBT_ACCOUNT = /\b(loan|borrowing|debenture|overdraft|lease liabilit|no
 // in this codebase (metricsService.js's capex query).
 const RE_ACCUM_DEPRECIATION = /accumulated\s*deprecia/i;
 
+// Trade receivables a company keeps outside the Accounts Receivable type: a
+// QuickBooks retailer books card / payment-processor settlements due to it as
+// Other Current Asset accounts ("Clipper Receivable", "Circle K Receivable",
+// "Credit Card Receivable") and may have no A/R-typed account at all — then
+// the Quick Ratio and AR Days read receivables as 0. Counted as receivables
+// alongside the A/R type; tax, refund, related-party, loan, advance and
+// employee "receivables" (TDS Receivable, IT Refund Receivable, Related Party
+// Receivables …) are not money customers owe, so they stay other current assets.
+const RE_TRADE_RECEIVABLE = /receivable/i;
+const RE_NON_TRADE_RECEIVABLE = /\b(tds|tax|gst|vat|refund|related\s*part|loan|advance|employee|staff|director|interest|deposit)/i;
+const isTradeReceivable = (tc, name) => tc === 'accounts_receivable'
+  || (tc === 'other_current_asset' && RE_TRADE_RECEIVABLE.test(name || '') && !RE_NON_TRADE_RECEIVABLE.test(name || ''));
+
 // Collapse an aggregateBS() snapshot { assets, liabilities, equity } (each a
 // Map of accountId -> {amount, typeCode, name}) into the scalar totals every
 // ratio needs. `currentAssets` / `currentLiabilities` use the EXACT SAME
@@ -103,7 +116,7 @@ function bsTotals(bs) {
     totalAssets += amount;
     const tc = (typeCode || '').toLowerCase();
     if (tc === 'bank' || tc === 'cash') bank += amount;
-    else if (tc === 'accounts_receivable') ar += amount;
+    else if (isTradeReceivable(tc, name)) ar += amount;
     else if (tc === 'other_current_asset') otherCurrentAsset += amount;
     else if (tc === 'fixed_asset' && !RE_ACCUM_DEPRECIATION.test(name || '')) grossFixedAssets += amount;
   }
@@ -164,9 +177,12 @@ const avg = (a, b) => (a + b) / 2;
  */
 function deriveCashFlowMetrics(pl, pli, close, open, hasOpening, investingOutflows) {
   if (!hasOpening) {
+    // No books before the period: the flows that need an opening balance sheet
+    // are N/A, but the cash it started with was simply nothing — so Net Change
+    // (closing − opening cash) is the closing cash.
     return {
       operatingCashFlow: null, changeInWorkingCapital: null,
-      capex: null, freeCashFlow: null, netChange: null, grossFixedAssets: null,
+      capex: null, freeCashFlow: null, netChange: r2(close.bank), grossFixedAssets: null,
     };
   }
   // WC matches Liquidity / Balance Sheet: Current Assets (incl. Bank) − CL.
@@ -225,7 +241,7 @@ async function computeCashFlowMetrics(userId, orgId, platform, from, to, fyStart
  * computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth)
  * Returns { ratios, raw }. `ratios` values are `null` when genuinely N/A
  * (no data for that figure), never a fabricated 0. Percent-style ratios
- * (margins, ROE, ROI, Cash Flow Ratio) are scaled ×100; multiples (Current
+ * (margins, ROE, ROI) are scaled ×100; multiples (Current Ratio, Cash Flow
  * Ratio, Equity Multiplier, turnover ratios, …) are plain numbers; day-count
  * ratios (AR/AP Days) are days.
  */
@@ -291,7 +307,9 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
   // Closing AR/AP from the Balance Sheet as of `to`; Revenue / Expenses from
   // the P&L for [from, to]. periodDays is inclusive (full FY ≈ 365).
   const periodDays = Math.max(1, Math.round((new Date(to) - new Date(from)) / 86400000) + 1);
-  const closingAR = Math.abs(close.ar);
+  // A credit balance on receivables (customers paid ahead) isn't days of
+  // collection — 0, never flipped positive.
+  const closingAR = Math.max(0, close.ar);
   const closingAP = Math.abs(close.ap);
   const apExpenseBase = num(pl.opex) + num(pl.otherExpense);
   const avgDebtorDays = pl.revenue > 0
@@ -309,10 +327,10 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
     currentRatio:   safe(currentAssetsCloseAbs, currentLiabilitiesCloseAbs),
     quickRatio:     safe(close.bank + close.ar, currentLiabilitiesCloseAbs),
     workingCapital: close.hasData ? (close.currentAssets - close.currentLiabilities) : null,
-    // Cash Flow Ratio = Operating Cash Flow ÷ Current Liabilities, as a %
-    // (same scaling as ROE / margins). E.g. OCF 32,064 / CL 1,183,867 ≈ 2.71%.
+    // Cash Flow Ratio = Operating Cash Flow ÷ Current Liabilities — a plain
+    // multiple like the Current Ratio, not a %. E.g. OCF 32,064 / CL 1,183,867 ≈ 0.03.
     cashFlowRatio:  cf.operatingCashFlow != null
-      ? pct(cf.operatingCashFlow, currentLiabilitiesCloseAbs)
+      ? safe(cf.operatingCashFlow, currentLiabilitiesCloseAbs)
       : null,
 
     // `returnOnEquity` = closing-equity basis, kept under its original name
@@ -362,4 +380,4 @@ async function computeKeyRatios(userId, orgId, platform, from, to, fyStartMonth 
   };
 }
 
-module.exports = { computeKeyRatios, computeCashFlowMetrics };
+module.exports = { computeKeyRatios, computeCashFlowMetrics, isTradeReceivable };
