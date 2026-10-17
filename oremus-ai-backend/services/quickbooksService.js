@@ -1408,8 +1408,39 @@ async function syncApLinks(userId, accessToken, realmId, environment) {
   return payments.length;
 }
 
-// Steps a sync run reports: eight entity syncs, the general ledger, bill-payment links.
-const QBO_SYNC_STEPS = 10;
+// ── Sync budgets → acc_budgets / acc_budget_lines ─────────────────────────────
+// QuickBooks keeps budgets (Plus / Advanced only) outside the ledger and serves
+// them read-only as the Budget entity: SELECT * FROM Budget returns each budget
+// with its BudgetDetail lines — an amount per account per period, and per class
+// / location / customer when the budget is subdivided.
+async function syncBudgets(userId, accessToken, realmId, environment) {
+  const { persistBudgets, recordBudgetSyncError } = require('./budgetsStore');
+  const { normalizeQboBudgets } = require('./budgetSources');
+  let list;
+  try {
+    list = await fetchAllEntities(realmId, accessToken, environment, 'Budget');
+  } catch (e) {
+    const status = e.response?.status;
+    const fault = e.response?.data?.Fault?.Error?.[0];
+    const detail = fault ? [fault.Message, fault.Detail].filter(Boolean).join(' — ') : e.message;
+    // A plan without budgets (Simple Start / Essentials) is recorded, not failed.
+    if (status === 400 || status === 403) {
+      await recordBudgetSyncError(userId, 'quickbooks', realmId,
+        `QuickBooks did not return budgets for this company (HTTP ${status}: ${detail}).`, 'unavailable');
+      return 0;
+    }
+    await recordBudgetSyncError(userId, 'quickbooks', realmId,
+      `Budgets could not be fetched${status ? ` (HTTP ${status})` : ''}: ${detail}`);
+    throw e;
+  }
+  const { budgets, linesById } = normalizeQboBudgets(list);
+  const stats = await persistBudgets(userId, 'quickbooks', realmId, budgets, linesById);
+  console.log(`[QBO Budgets] Synced ${stats.budgets} budgets (${stats.lines} amounts) for userId=${userId} realmId=${realmId}`);
+  return stats.budgets;
+}
+
+// Steps a sync run reports: nine entity syncs, the general ledger, bill-payment links.
+const QBO_SYNC_STEPS = 11;
 
 // `run` (optional, see syncRunService) receives each step's progress and outcome.
 async function syncAllQBOData(userId, accessToken, realmId, environment, { run = null } = {}) {
@@ -1424,8 +1455,9 @@ async function syncAllQBOData(userId, accessToken, realmId, environment, { run =
     step('bills', () => syncBills(userId, accessToken, realmId, environment)),
     step('expenses', () => syncExpenses(userId, accessToken, realmId, environment)),
     step('customer payments', () => syncCustomerPayments(userId, accessToken, realmId, environment)),
+    step('budgets', () => syncBudgets(userId, accessToken, realmId, environment)),
   ]);
-  const [acct, cust, vend, inv, srec, bil, exp, cpay] = results.map((r) =>
+  const [acct, cust, vend, inv, srec, bil, exp, cpay, bud] = results.map((r) =>
     r.status === 'fulfilled' ? r.value : `ERR: ${r.reason?.message}`
   );
   // Build the FULL general ledger AFTER the accounts sync (it needs the Chart
@@ -1446,7 +1478,7 @@ async function syncAllQBOData(userId, accessToken, realmId, environment, { run =
     links = `ERR: ${e.message}`;
     console.error('[QBO Sync] A/P application links failed:', e.message);
   }
-  console.log(`[QBO Sync] Done — accounts:${acct} customers:${cust} vendors:${vend} invoices:${inv} salesReceipts:${srec} bills:${bil} expenses:${exp} customerPayments:${cpay} ledger:${gl} billPayments:${links}`);
+  console.log(`[QBO Sync] Done — accounts:${acct} customers:${cust} vendors:${vend} invoices:${inv} salesReceipts:${srec} bills:${bil} expenses:${exp} customerPayments:${cpay} budgets:${bud} ledger:${gl} billPayments:${links}`);
 }
 
 // ── Fetch CompanyInfo to get the company name / country / currency ───────────
@@ -1665,6 +1697,7 @@ module.exports = {
   // Sync
   syncAllQBOData,
   QBO_SYNC_STEPS,
+  syncBudgets,
   syncAccounts,
   syncCustomers,
   syncVendors,

@@ -42,6 +42,7 @@ const ACCOUNTING_PASSTHROUGH = [
   'interval_type', 'number_of_columns', 'compare_with',
   'currency_id', 'filter_by',
   'bs_from', // Balance Sheet: optional From date → Current-Year-Earnings split point
+  'budget_id', 'dimension', // Budget Summary: which budget, and one QuickBooks class / location / customer of it
 ];
 function buildParams(q) {
   const p = {};

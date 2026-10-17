@@ -1,12 +1,16 @@
-// Budget Summary viewer — supports fiscal-year columns (yearly) and
-// calendar-month columns (monthly). Reads the `period` field from the
-// backend response to decide which mode to use.
+// Budget Summary viewer — the budget as entered on the client's platform
+// (Xero Budget Manager, QuickBooks budgets, Zoho Books budgets), laid out the
+// way that platform lays it out. Every column, section and label comes from the
+// backend (budgetSummaryService); this page only adds the controls:
+//   · date range
+//   · period — one column per month / quarter / (half-year) / year
+//   · budget — any budget the platform has
+//   · subdivision — one QuickBooks class / location / customer of a
+//     subdivided budget (shown only when the budget has them)
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import {
-  ArrowLeft, Star, X, ChevronDown,
-} from 'lucide-react';
+import { ArrowLeft, Star, ChevronDown } from 'lucide-react';
 import Popover from '../ui/Popover.jsx';
 import ExportMenu from './ExportMenu.jsx';
 import ReportSkeleton from './ReportSkeleton.jsx';
@@ -21,33 +25,16 @@ import { fmt, currencySymbol } from '../../utils/fmt.js';
 import { cn } from '../../utils/classNames.js';
 import { useReportSort } from './useReportSort.jsx';
 
-const XERO_BLUE = '#1A73E8';
+const ACCENT = '#1A73E8';
 
-// Period extension — yearly mode (fiscal year columns)
-// Negative values = previous years, positive = future years
-const FUTURE_PERIODS_YEARLY = [
-  ['-5', 'Previous 5 years'],
-  ['-3', 'Previous 3 years'],
-  ['-2', 'Previous 2 years'],
-  ['-1', 'Previous 1 year'],
-  ['0',  'No extra periods'],
-  ['1',  'Next 1 year'],
-  ['2',  'Next 2 years'],
-  ['3',  'Next 3 years'],
-  ['5',  'Next 5 years'],
-];
-// Future periods — monthly mode
-const FUTURE_PERIODS_MONTHLY = [
-  ['0',  'No future periods'],
-  ['2',  'Next 2 periods'],
-  ['5',  'Next 5 periods'],
-  ['11', 'Next 11 periods'],
-  ['23', 'Next 23 periods'],
-];
+const INTERVAL_LABELS = {
+  month: 'Month',
+  quarter: 'Quarter',
+  half_year: 'Half-year',
+  year: 'Year',
+};
 
-const BUDGETS = ['Overall Budget'];
-
-const XERO_PERIODS = [
+const DATE_PRESETS = [
   ['this-month',           'This month'],
   ['previous-month',       'Last month'],
   ['this-quarter',         'This quarter'],
@@ -56,22 +43,14 @@ const XERO_PERIODS = [
   ['previous-fiscal-year', 'Last financial year'],
   ['custom',               'Custom'],
 ];
-const PERIOD_LABELS = Object.fromEntries(XERO_PERIODS);
+const PRESET_LABELS = Object.fromEntries(DATE_PRESETS);
 
 const fieldCls =
   'h-9 px-3 rounded-md bg-white dark:bg-navy-900 border border-navy-300 dark:border-navy-700 text-[13px] text-navy-900 dark:text-white outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20';
 
-const prettyDate = (s) => {
-  if (!s) return '';
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return s;
-  return d.toLocaleString('en-US', { day: 'numeric', month: 'long', year: 'numeric' });
-};
-
 function fmtCell(v, sym) {
   if (v == null || Number.isNaN(v) || v === 0) return '-';
-  const s = fmt(Math.abs(v), { dec: 0, sign: sym });
-  return v < 0 ? `(${s})` : s;
+  return fmt(v, { dec: 2, sign: sym });
 }
 
 export default function BudgetSummaryViewer() {
@@ -83,8 +62,10 @@ export default function BudgetSummaryViewer() {
   const filters = useSelector(selectFilters);
   const favorites = useSelector(selectFavorites);
 
-  const [future, setFuture] = useState('0');
-  const [budget, setBudget] = useState('Overall Budget');
+  // null = whatever the last response used.
+  const [intervalPick, setIntervalPick] = useState(null);
+  const [budgetPick, setBudgetPick] = useState(null);
+  const [dimensionPick, setDimensionPick] = useState(null);
 
   const favorited = !!favorites[report.name];
   const loading = status === 'loading';
@@ -96,50 +77,27 @@ export default function BudgetSummaryViewer() {
   );
   const fromVal = filters.customFrom || range.from_date;
   const toVal = filters.customTo || range.to_date;
-  const budgetName = data?.budgetName || budget;
 
-  // Detect period mode from backend response
-  const isYearly = data?.period === 'yearly';
-  const FUTURE_PERIODS = isYearly ? FUTURE_PERIODS_YEARLY : FUTURE_PERIODS_MONTHLY;
+  const intervals = Array.isArray(data?.intervals) && data.intervals.length ? data.intervals : ['month', 'quarter', 'year'];
+  const interval = intervalPick || data?.interval || 'month';
+  const budgets = Array.isArray(data?.budgets) ? data.budgets : [];
+  const budgetId = budgetPick ?? data?.budgetId ?? '';
+  const dimensions = Array.isArray(data?.dimensions) ? data.dimensions : [];
+  const dimension = dimensionPick ?? data?.dimension ?? '';
+  const budgetName = data?.budgetName || 'Budget';
+  const dimensionLabel = dimensions.find((d) => d.key === dimension)?.label;
 
-  // Extend the date range based on the `future` dropdown:
-  //  • Positive value → extend to_date forward (Next X years)
-  //  • Negative value → extend from_date backward (Previous X years)
-  const { extendedFromDate, extendedToDate } = useMemo(() => {
-    const n = Number(future || 0);
-    if (n === 0 || isYearly === false) return { extendedFromDate: fromVal, extendedToDate: toVal };
-
-    const fmt = (d) => {
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      return `${yyyy}-${mm}-${dd}`;
-    };
-
-    if (n > 0 && toVal) {
-      // Future: extend to_date forward
-      const d = new Date(toVal);
-      if (!Number.isNaN(d.getTime())) {
-        d.setFullYear(d.getFullYear() + n);
-        return { extendedFromDate: fromVal, extendedToDate: fmt(d) };
-      }
-    }
-    if (n < 0 && fromVal) {
-      // Previous: extend from_date backward
-      const d = new Date(fromVal);
-      if (!Number.isNaN(d.getTime())) {
-        d.setFullYear(d.getFullYear() + n); // n is negative
-        return { extendedFromDate: fmt(d), extendedToDate: toVal };
-      }
-    }
-    return { extendedFromDate: fromVal, extendedToDate: toVal };
-  }, [fromVal, toVal, future, isYearly]);
-
-  const runReport = () => dispatch(loadReportData({
+  const runReport = (over = {}) => dispatch(loadReportData({
     reportName: report.name,
     clientId: client?.id,
     provider: report.provider,
-    filters: { period: 'yearly', from_date: extendedFromDate, to_date: extendedToDate },
+    filters: {
+      from_date: fromVal,
+      to_date: toVal,
+      interval: over.interval || interval,
+      budget_id: (over.budgetId ?? budgetId) || undefined,
+      dimension: (over.dimension ?? dimension) || undefined,
+    },
   }));
 
   const initialLoad = useRef(true);
@@ -151,18 +109,7 @@ export default function BudgetSummaryViewer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-run when future period count changes and data is already loaded
-  const prevFuture = useRef(future);
-  useEffect(() => {
-    if (prevFuture.current !== future && data) {
-      prevFuture.current = future;
-      runReport();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [future]);
-
-  // Auto re-run when the date range changes (after the initial mount load) so
-  // the date pickers / presets actually refresh the report.
+  // Re-run when the date range changes (after the first load).
   const filterMounted = useRef(false);
   useEffect(() => {
     if (!filterMounted.current) { filterMounted.current = true; return; }
@@ -170,50 +117,25 @@ export default function BudgetSummaryViewer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.dateRange, filters.customFrom, filters.customTo]);
 
-  // ── Build value columns ──
   const valueCols = useMemo(() => {
-    if (!data?.columns) return [{ key: 'total', label: 'Total' }];
-
-    // Backend already returns the correct number of columns based on the
-    // extended to_date. Just read all period columns + Total.
-    if (isYearly && data.period === 'yearly') {
-      const periodCols = data.columns.filter(c => c.key !== 'label' && c.key !== 'total');
-      return [...periodCols, { key: 'total', label: 'Total' }];
-    }
-
-    // Monthly fallback
-    const periodCount = Math.min(24, Math.max(1, 1 + Number(future || 0)));
-    const startDate = fromVal ? new Date(fromVal) : new Date(2026, 0, 1);
-    const startMonth = Number.isNaN(startDate.getTime()) ? 0 : startDate.getMonth();
-    const startYear = Number.isNaN(startDate.getTime()) ? 2026 : startDate.getFullYear();
-    const monthCols = Array.from({ length: periodCount }, (_, i) => {
-      const d = new Date(startYear, startMonth + i, 1);
-      const label = d.toLocaleString('en-US', { month: 'short', year: 'numeric' });
-      return { key: `m${i + 1}`, label, srcKey: `m${i + 1}` };
-    });
-    return [...monthCols, { key: 'total', label: 'Total' }];
-  }, [data?.columns, data?.period, future, fromVal, isYearly]);
-
-  // Show the EXTENDED period in the header so the user sees the full range.
-  const periodDisplay = useMemo(() => ({
-    from: extendedFromDate || fromVal,
-    to: extendedToDate || toVal,
-  }), [extendedFromDate, extendedToDate, fromVal, toVal]);
+    const cols = (data?.columns || []).filter((c) => c.key !== 'label' && c.key !== 'total');
+    return [...cols, { key: 'total', label: 'Total' }];
+  }, [data?.columns]);
 
   const cellValue = (r, col) => {
     if (!r.cells) return undefined;
-    if (col.key === 'total') {
-      return valueCols
-        .filter(c => c.key !== 'total')
-        .reduce((acc, c) => acc + (r.cells[c.key] || r.cells[c.srcKey] || 0), 0);
+    if (col.key === 'total' && r.cells.total == null) {
+      return valueCols.filter((c) => c.key !== 'total').reduce((s, c) => s + (Number(r.cells[c.key]) || 0), 0);
     }
-    return r.cells[col.key] ?? r.cells[col.srcKey];
+    return r.cells[col.key];
   };
 
   const { rows, header } = useReportSort(data?.rows || [], {
     getValue: (r, key) => cellValue(r, valueCols.find((c) => c.key === key) || { key }),
   });
-  const rowPad = 'py-1';
+
+  const periodFrom = data?.meta?.from || fromVal;
+  const periodTo = data?.meta?.to || toVal;
 
   return (
     <>
@@ -242,7 +164,7 @@ export default function BudgetSummaryViewer() {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <ExportMenu
-            meta={{ company: client?.name, from: periodDisplay.from, to: periodDisplay.to }}
+            meta={{ company: data?.meta?.company || client?.name, from: periodFrom, to: periodTo }}
             trigger={(
               <button type="button" className="h-8 px-2.5 rounded-md border border-navy-200 dark:border-navy-700 text-navy-700 dark:text-navy-200 hover:bg-navy-50 dark:hover:bg-navy-800 inline-flex items-center gap-1 text-[12.5px] font-semibold">
                 Export <ChevronDown size={13} />
@@ -254,11 +176,11 @@ export default function BudgetSummaryViewer() {
 
       {/* Filter bar */}
       <div className="border-b border-navy-200 dark:border-navy-800 bg-white dark:bg-navy-950 px-4 sm:px-6 py-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 items-end gap-x-4 gap-y-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 items-end gap-x-4 gap-y-3">
           {/* Date range */}
           <div className="shrink-0">
             <div className="text-[11px] text-navy-500 dark:text-navy-400 mb-1">
-              Date range: <span className="font-semibold text-navy-700 dark:text-navy-200">{PERIOD_LABELS[filters.dateRange] || 'Custom'}</span>
+              Date range: <span className="font-semibold text-navy-700 dark:text-navy-200">{PRESET_LABELS[filters.dateRange] || 'Custom'}</span>
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -284,7 +206,7 @@ export default function BudgetSummaryViewer() {
               >
                 {({ close }) => (
                   <div className="flex flex-col">
-                    {XERO_PERIODS.map(([v, l]) => (
+                    {DATE_PRESETS.map(([v, l]) => (
                       <button
                         key={v}
                         type="button"
@@ -303,12 +225,16 @@ export default function BudgetSummaryViewer() {
             </div>
           </div>
 
-          {/* Future periods to show */}
+          {/* Column width */}
           <div className="shrink-0">
-            <div className="text-[11px] text-navy-500 dark:text-navy-400 mb-1">Future periods to show</div>
-            <select value={future} onChange={(e) => setFuture(e.target.value)} className={cn(fieldCls, 'w-full')}>
-              {FUTURE_PERIODS.map(([v, l]) => (
-                <option key={v} value={v}>{l}</option>
+            <div className="text-[11px] text-navy-500 dark:text-navy-400 mb-1">Period</div>
+            <select
+              value={interval}
+              onChange={(e) => { setIntervalPick(e.target.value); runReport({ interval: e.target.value }); }}
+              className={cn(fieldCls, 'w-full')}
+            >
+              {intervals.map((v) => (
+                <option key={v} value={v}>{INTERVAL_LABELS[v] || v}</option>
               ))}
             </select>
           </div>
@@ -316,18 +242,40 @@ export default function BudgetSummaryViewer() {
           {/* Budget */}
           <div className="shrink-0">
             <div className="text-[11px] text-navy-500 dark:text-navy-400 mb-1">Budget</div>
-            <select value={budget} onChange={(e) => setBudget(e.target.value)} className={cn(fieldCls, 'w-full')}>
-              {BUDGETS.map((b) => (
-                <option key={b} value={b}>{b}</option>
-              ))}
+            <select
+              value={budgetId}
+              onChange={(e) => { setBudgetPick(e.target.value); setDimensionPick(''); runReport({ budgetId: e.target.value, dimension: '' }); }}
+              disabled={!budgets.length}
+              className={cn(fieldCls, 'w-full')}
+            >
+              {budgets.length ? budgets.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              )) : <option value="">No budgets</option>}
             </select>
           </div>
 
+          {/* Subdivision (QuickBooks class / location / customer) */}
+          {dimensions.length > 0 && (
+            <div className="shrink-0">
+              <div className="text-[11px] text-navy-500 dark:text-navy-400 mb-1">Subdivision</div>
+              <select
+                value={dimension}
+                onChange={(e) => { setDimensionPick(e.target.value); runReport({ dimension: e.target.value }); }}
+                className={cn(fieldCls, 'w-full')}
+              >
+                <option value="">All (total)</option>
+                {dimensions.map((d) => (
+                  <option key={d.key} value={d.key}>{d.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <button
             type="button"
-            onClick={runReport}
+            onClick={() => runReport()}
             className="h-9 px-4 rounded-md text-white text-[13px] font-semibold shadow-soft hover:opacity-95 shrink-0 justify-self-start"
-            style={{ background: XERO_BLUE }}
+            style={{ background: ACCENT }}
           >
             Update
           </button>
@@ -341,18 +289,25 @@ export default function BudgetSummaryViewer() {
             <div className="mb-6">
               <div className="text-[20px] font-bold text-navy-900 dark:text-white leading-tight">{report.name} - {budgetName}</div>
               <div className="text-[13px] text-navy-700 dark:text-navy-200 mt-1">{data?.meta?.company || client?.name || 'Oremus'}</div>
-              <div className="text-[12.5px] text-navy-500">For the period {prettyDate(periodDisplay.from)} to {prettyDate(periodDisplay.to)}</div>
-              <div className="text-[12.5px] text-navy-500">{budgetName}</div>
+              <div className="text-[12.5px] text-navy-500">{data?.meta?.periodText || `${periodFrom || ''} - ${periodTo || ''}`}</div>
+              <div className="text-[12.5px] text-navy-500">{budgetName}{dimensionLabel ? ` · ${dimensionLabel}` : ''}</div>
+              {data?.meta?.note && (
+                <div className="text-[12px] text-amber-700 dark:text-amber-400 mt-1">{data.meta.note}</div>
+              )}
             </div>
 
             {loading || !data ? (
               <ReportSkeleton />
+            ) : !rows.length ? (
+              <div className="py-16 text-center text-[13px] text-navy-500 dark:text-navy-400">
+                {data?.message || 'No budget figures for the selected period.'}
+              </div>
             ) : (
               <div className="overflow-auto scroll-thin max-h-[calc(100vh-15rem)]">
-                <table className="w-full text-[12.5px] min-w-[1100px]">
+                <table className="w-full text-[12.5px] min-w-[900px]">
                   <thead>
                     <tr className="text-[11.5px] text-navy-500 dark:text-navy-400">
-                      <th className="sticky top-0 z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 text-left font-semibold py-2 pr-4">{header({ key: 'label', label: '' }, { isLabel: true })}</th>
+                      <th className="sticky top-0 z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 text-left font-semibold py-2 pr-4">{header({ key: 'label', label: 'Account' }, { isLabel: true })}</th>
                       {valueCols.map((c) => (
                         <th key={c.key} className="sticky top-0 z-20 bg-white dark:bg-navy-900 border-b border-navy-200 dark:border-navy-700 text-right font-semibold py-2 px-3 whitespace-nowrap">{header({ align: 'right', ...c })}</th>
                       ))}
@@ -377,9 +332,9 @@ export default function BudgetSummaryViewer() {
                             r.isSubtotal && 'font-semibold',
                           )}
                         >
-                          <td className={cn(rowPad, 'pr-4 text-navy-700 dark:text-navy-200', emph ? 'pl-2' : 'pl-5')}>{r.label}</td>
+                          <td className={cn('py-1 pr-4 whitespace-nowrap text-navy-700 dark:text-navy-200', emph ? 'pl-2' : 'pl-5')}>{r.label}</td>
                           {valueCols.map((c) => (
-                            <td key={c.key} className={cn(rowPad, 'px-3 text-right tabular-nums whitespace-nowrap text-navy-800 dark:text-navy-100')}>
+                            <td key={c.key} className="py-1 px-3 text-right tabular-nums whitespace-nowrap text-navy-800 dark:text-navy-100">
                               {fmtCell(cellValue(r, c), sym)}
                             </td>
                           ))}
@@ -393,7 +348,6 @@ export default function BudgetSummaryViewer() {
           </div>
         </div>
       </div>
-
     </>
   );
 }

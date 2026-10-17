@@ -1043,13 +1043,118 @@ async function syncJournals(userId, accessToken, tenantId) {
   return totalJournals;
 }
 
+// ── Sync budgets (Budget Manager) → acc_budgets / acc_budget_lines ──────────
+// GET /Budgets lists every budget (no lines); each budget's monthly amounts
+// come from GET /Budgets/{id}, at most 24 months per call — without dates Xero
+// returns just the previous, current and next month. So each budget is read in
+// 24-month windows spanning the org's books: from the financial year of its
+// first ledger entry (at most 8 years back) to the end of the financial year
+// two years out. Needs the accounting.budgets.read scope.
+const BUDGET_WINDOW_MONTHS = 24;
+
+async function budgetWindows(userId, tenantId) {
+  const [[org]] = await pool.execute(
+    'SELECT fiscal_year_end_month FROM xero_organizations WHERE user_id = ? AND tenant_id = ? LIMIT 1',
+    [userId, String(tenantId)]
+  ).catch(() => [[null]]);
+  const fyEnd = Number(org?.fiscal_year_end_month);
+  const fyStart = Number.isInteger(fyEnd) && fyEnd >= 1 && fyEnd <= 12 ? (fyEnd % 12) + 1 : 1;
+  const [[first]] = await pool.execute(
+    'SELECT DATE_FORMAT(MIN(transaction_date), \'%Y-%m\') AS ym FROM account_transactions WHERE user_id = ? AND org_id = ?',
+    [userId, String(tenantId)]
+  ).catch(() => [[null]]);
+
+  const now = new Date();
+  const idx = (y, m) => y * 12 + (m - 1); // month index
+  const today = idx(now.getFullYear(), now.getMonth() + 1);
+  let start = today - 36;
+  if (first?.ym) {
+    const [y, m] = first.ym.split('-').map(Number);
+    start = idx(y, m);
+  }
+  start = Math.max(Math.min(start, today), today - 96);
+  // Back to the start of that financial year; forward to the end of the one
+  // two years from now.
+  start -= ((start % 12) - (fyStart - 1) + 12) % 12;
+  const target = today + 24;
+  const end = target - (((target % 12) - (fyStart - 1) + 12) % 12) + 11;
+
+  const ymd = (i, last) => {
+    const y = Math.floor(i / 12);
+    const m = (i % 12) + 1;
+    const d = last ? new Date(Date.UTC(y, m, 0)).getUTCDate() : 1;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  };
+  const windows = [];
+  for (let s = start; s <= end; s += BUDGET_WINDOW_MONTHS) {
+    windows.push({ from: ymd(s, false), to: ymd(Math.min(s + BUDGET_WINDOW_MONTHS - 1, end), true) });
+  }
+  return { windows, from: ymd(start, false), to: ymd(end, true) };
+}
+
+async function syncBudgets(userId, accessToken, tenantId) {
+  const { persistBudgets, recordBudgetSyncError } = require('./budgetsStore');
+  const { normalizeXeroBudgets } = require('./budgetSources');
+  const headers = xeroHeaders(accessToken, tenantId);
+  let budgets;
+  try {
+    const res = await xeroGet(`${XERO_API_BASE}/Budgets`, { headers });
+    budgets = res.data?.Budgets || [];
+  } catch (e) {
+    const status = e.response?.status;
+    await recordBudgetSyncError(userId, 'xero', tenantId,
+      status === 401 || status === 403
+        ? 'Xero denied access to budgets — the connection is missing the accounting.budgets.read permission.'
+        : `Budgets could not be fetched${status ? ` (HTTP ${status})` : ''}: ${e.message}`);
+    throw e;
+  }
+
+  const { windows, from, to } = await budgetWindows(userId, tenantId);
+  const linesById = new Map();
+  const failed = [];
+  for (const b of budgets) {
+    const id = String(b.BudgetID || '');
+    if (!id) continue;
+    const byAccount = new Map();
+    try {
+      for (const w of windows) {
+        const res = await xeroGet(`${XERO_API_BASE}/Budgets/${id}`, {
+          headers, params: { DateFrom: w.from, DateTo: w.to },
+        });
+        const detail = [].concat(res.data?.Budgets || [])[0] || {};
+        for (const line of detail.BudgetLines || []) {
+          const k = line.AccountID || line.AccountCode;
+          if (!k) continue;
+          if (!byAccount.has(k)) byAccount.set(k, { AccountID: line.AccountID, AccountCode: line.AccountCode, BudgetBalances: [] });
+          byAccount.get(k).BudgetBalances.push(...(line.BudgetBalances || []));
+        }
+      }
+      linesById.set(id, [...byAccount.values()]);
+    } catch (e) {
+      linesById.set(id, null); // keep this budget's stored lines
+      failed.push({ name: b.Description || id, e });
+    }
+  }
+
+  const normalized = normalizeXeroBudgets(budgets, linesById);
+  const stats = await persistBudgets(userId, 'xero', tenantId, normalized.budgets, normalized.linesById, { from, to });
+  console.log(`[Xero Budgets] Synced ${stats.budgets} budgets (${stats.lines} monthly amounts, ${from} → ${to}) for userId=${userId} tenant=${tenantId}`);
+  if (failed.length) {
+    const err = failed[0].e;
+    err.message = `lines of ${failed.length} budget(s) (${failed.map((f) => f.name).join(', ')}) could not be fetched: ${err.message}`;
+    throw err;
+  }
+  return stats.budgets;
+}
+
 // ── Master sync ─────────────────────────────────────────────────────────────
-// Steps a sync run reports for one tenant: the eight entity syncs + the ledger.
-const XERO_SYNC_STEPS = 9;
+// Steps a sync run reports for one tenant: the nine entity syncs + the ledger.
+const XERO_SYNC_STEPS = 10;
 const XERO_STEP_LABELS = new Map([
   [syncAccounts, 'chart of accounts'], [syncCustomers, 'customers'], [syncVendors, 'vendors'],
   [syncInvoices, 'invoices'], [syncBills, 'bills'], [syncExpenses, 'expenses'],
   [syncBankTransactions, 'bank transactions'], [syncManualJournals, 'manual journals'],
+  [syncBudgets, 'budgets'],
 ]);
 // Ledger-rebuild fetch keys → what the admin reads in a warning.
 const XERO_LEDGER_ENTITY_LABEL = {
@@ -1070,7 +1175,7 @@ async function syncAllXeroData(userId, accessToken, tenantId, { run = null } = {
   // for granular apps (connections from 29 Apr 2026), so it only ever 401s.
   const steps = [
     syncAccounts, syncCustomers, syncVendors, syncInvoices, syncBills,
-    syncExpenses, syncBankTransactions, syncManualJournals,
+    syncExpenses, syncBankTransactions, syncManualJournals, syncBudgets,
   ];
   const results = [];
   for (const step of steps) {
@@ -1084,10 +1189,10 @@ async function syncAllXeroData(userId, accessToken, tenantId, { run = null } = {
       run?.fail(label, reason);
     }
   }
-  const [acct, cust, vend, inv, bil, exp, bank, jrn] = results.map((r) =>
+  const [acct, cust, vend, inv, bil, exp, bank, jrn, bud] = results.map((r) =>
     r.status === 'fulfilled' ? r.value : `ERR: ${r.reason?.message}`
   );
-  console.log(`[Xero Sync] Done — accounts:${acct} customers:${cust} vendors:${vend} invoices:${inv} bills:${bil} expenses:${exp} bank:${bank} manualJournals:${jrn}`);
+  console.log(`[Xero Sync] Done — accounts:${acct} customers:${cust} vendors:${vend} invoices:${inv} bills:${bil} expenses:${exp} bank:${bank} manualJournals:${jrn} budgets:${bud}`);
 
   // Rebuild the DB-backed general ledger (account_transactions) via the Path B
   // posting engine so every Xero report (P&L / BS / TB / GL / Bank & Executive
@@ -1137,5 +1242,7 @@ module.exports = {
   syncExpenses,
   syncBankTransactions,
   syncManualJournals,
+  syncBudgets,
+  budgetWindows,
   syncJournals,
 };

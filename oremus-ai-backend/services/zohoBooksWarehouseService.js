@@ -1671,6 +1671,128 @@ async function syncRecurringBills(userId, accessToken, orgId, runId) {
   return { calls, fetched: items.length, inserted: items.length, updated: 0, failed: 0 };
 }
 
+// ── Budgets → acc_budgets / acc_budget_lines ────────────────────────────────
+// Zoho Books (Premium plan and up) has no budgets endpoint. The documented route
+// is per account: GET /registers/{account_id}/budgetvsactuals lists the org's
+// budgets (budget_info_list) and, with a budget_id, returns that account's
+// budget per period. So one call lists the budgets, then one call per profit-
+// and-loss account per budget reads the previous two, current and next
+// financial years. That is ~100+ calls per budget, so the 6-hourly cron
+// refreshes budgets at most once a day; OAuth, manual and nightly syncs always do.
+const ZB_BUDGET_SYNC_HOURS = parseInt(process.env.ZB_BUDGET_SYNC_HOURS || '20', 10);
+// ≤ ~90 calls a minute — Zoho allows 100 per organisation.
+const ZB_BUDGET_CALL_DELAY_MS = parseInt(process.env.ZB_BUDGET_CALL_DELAY_MS || '650', 10);
+const ZB_BUDGET_ACCOUNT_TYPES = ['income', 'other_income', 'cost_of_goods_sold', 'expense', 'other_expense'];
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+// The org's financial-year start month (1–12), from the synced organization.
+async function zohoFyStartMonth(userId, orgId) {
+  const [[org]] = await pool.execute(
+    'SELECT fiscal_year_start_month FROM zb_organizations WHERE user_id = ? AND org_id = ? LIMIT 1',
+    [userId, orgId]
+  ).catch(() => [[null]]);
+  const raw = String(org?.fiscal_year_start_month || '').trim().toLowerCase();
+  const byName = MONTH_NAMES.findIndex((m) => raw && m.startsWith(raw.slice(0, 3)));
+  if (byName >= 0) return byName + 1;
+  const n = parseInt(raw, 10);
+  return n >= 1 && n <= 12 ? n : 4;
+}
+
+// From the start of the financial year two years back to the end of next year's.
+function zohoBudgetWindow(fyStart, today = new Date()) {
+  const idx = today.getFullYear() * 12 + today.getMonth();
+  const curStart = idx - (((idx % 12) - (fyStart - 1) + 12) % 12);
+  const fmt = (i, last) => {
+    const y = Math.floor(i / 12);
+    const m = (i % 12) + 1;
+    const d = last ? new Date(Date.UTC(y, m, 0)).getUTCDate() : 1;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  };
+  return { from: fmt(curStart - 24, false), to: fmt(curStart + 23, true) };
+}
+
+async function syncBudgets(userId, accessToken, orgId, runId, opts = {}) {
+  const store = require('./budgetsStore');
+  const { zohoBudgetList, normalizeZohoBudgetAccount, withRange } = require('./budgetSources');
+  const counts = { fetched: 0, inserted: 0, updated: 0, failed: 0, calls: 0 };
+
+  if (opts.triggerSource === 'cron') {
+    const last = await store.loadBudgetSync(userId, 'zoho', orgId);
+    if (last?.status === 'ok' && Date.now() - new Date(last.synced_at).getTime() < ZB_BUDGET_SYNC_HOURS * 3600e3) return counts;
+  }
+
+  const [accounts] = await pool.query(
+    `SELECT zoho_account_id, account_code, account_name FROM zb_chart_of_accounts
+      WHERE user_id = ? AND org_id = ? AND COALESCE(is_deleted, 0) = 0 AND account_type IN (?)
+      ORDER BY account_type, account_name`,
+    [userId, orgId, ZB_BUDGET_ACCOUNT_TYPES]
+  );
+  if (!accounts.length) return counts;
+
+  const get = async (accountId, params) => {
+    counts.calls += 1;
+    const res = await zohoGet(`${API_BASE}/registers/${accountId}/budgetvsactuals`,
+      { organization_id: orgId, ...params }, accessToken);
+    if (res.data?.code !== 0) {
+      throw Object.assign(new Error(res.data?.message || `Zoho code ${res.data?.code}`), { zohoCode: res.data?.code });
+    }
+    return res.data;
+  };
+
+  let list;
+  try {
+    list = zohoBudgetList(await get(accounts[0].zoho_account_id, {}));
+  } catch (e) {
+    if (e instanceof RateLimitError || e?.isRateLimit) throw e;
+    const status = e.response?.status;
+    const msg = e.response?.data?.message || e.message;
+    // No budgets feature on this plan / for this user → recorded, not failed.
+    await store.recordBudgetSyncError(userId, 'zoho', orgId,
+      `Zoho Books did not return budgets${status ? ` (HTTP ${status})` : ''}: ${msg}`,
+      status === 401 ? 'error' : 'unavailable');
+    if (status === 401) throw e;
+    return counts;
+  }
+
+  const window = zohoBudgetWindow(await zohoFyStartMonth(userId, orgId));
+  const budgets = [];
+  const linesById = new Map();
+  for (const b of list) {
+    const lines = [];
+    let failed = false;
+    for (const a of accounts) {
+      await sleep(ZB_BUDGET_CALL_DELAY_MS);
+      let data;
+      try {
+        data = await get(a.zoho_account_id, { budget_id: b.id, from_date: window.from, to_date: window.to, period: 'monthly' });
+      } catch (e) {
+        if (e instanceof RateLimitError || e?.isRateLimit) throw e; // stored budgets kept; next run retries
+        failed = true;
+        counts.failed += 1;
+        console.warn(`[ZB Budgets] ${b.name} / ${a.account_name}: ${e.message}`);
+        break;
+      }
+      const r = normalizeZohoBudgetAccount(data, {
+        accountId: a.zoho_account_id, accountCode: a.account_code, accountName: a.account_name,
+        from: window.from, period: 'monthly',
+      });
+      if (!r.recognized) {
+        // Don't store figures we can't read with certainty.
+        const msg = `Zoho's budget figures came back in a form this version doesn't read (period fields: ${r.sampleKeys.join(', ')}).`;
+        await store.recordBudgetSyncError(userId, 'zoho', orgId, msg);
+        throw new Error(msg);
+      }
+      lines.push(...r.lines);
+    }
+    budgets.push(withRange({ id: b.id, name: b.name, entryPeriod: 'monthly' }, lines));
+    linesById.set(b.id, failed ? null : lines);
+  }
+
+  const stats = await store.persistBudgets(userId, 'zoho', orgId, budgets, linesById, window);
+  console.log(`[ZB Budgets] Synced ${stats.budgets} budgets (${stats.lines} amounts, ${counts.calls} calls) for userId=${userId} org=${orgId}`);
+  return { ...counts, fetched: stats.budgets, inserted: stats.lines };
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Orchestrator
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1700,6 +1822,7 @@ const MODULE_FUNCTIONS = {
   expenses:            { fn: syncExpenses,           endpoint: '/expenses' },
   journals:            { fn: syncJournals,           endpoint: '/journals' },
   bank_accounts:       { fn: syncBankAccounts,       endpoint: '/bankaccounts' },
+  budgets:             { fn: syncBudgets,            endpoint: '/registers/:id/budgetvsactuals' },
   // bank_transactions: handled by the legacy zohoService sync into `bank_transactions`
   // (the `zb_bank_transactions` warehouse table was removed; both held identical data).
 };
@@ -1719,6 +1842,8 @@ const MODULE_ORDER = [
   'expenses',
   'journals',
   'bank_accounts',
+  // Last: many calls, and nothing else depends on it.
+  'budgets',
 ];
 
 async function syncAll(userId, accessToken, orgId, opts = {}) {
@@ -1735,7 +1860,7 @@ async function syncAll(userId, accessToken, orgId, opts = {}) {
     if (!def) { console.warn(`[ZB] unknown module: ${mod}`); continue; }
     const itemId = await startRunItem(run.id, mod, def.endpoint);
     try {
-      const counts = await def.fn(userId, accessToken, orgId, run.id);
+      const counts = await def.fn(userId, accessToken, orgId, run.id, opts);
       await finishRunItem(itemId, 'succeeded', counts, null);
       await bumpRunCounts(run.id, { inserted: counts.inserted, updated: counts.updated, failed: counts.failed, calls: counts.calls });
       console.log(`[ZB Warehouse] ${mod}: fetched=${counts.fetched} inserted=${counts.inserted} failed=${counts.failed}`);
@@ -1821,4 +1946,5 @@ module.exports = {
   MODULE_FUNCTIONS,
   startRun, finishRun,
   getWatermark, setWatermark,
+  syncBudgets, zohoBudgetWindow,
 };

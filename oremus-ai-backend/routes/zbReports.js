@@ -167,6 +167,7 @@ const ALLOWED_PARAMS = new Set([
   'compare', 'compare_count', 'oldest_first',
   'periods', 'future_periods',
   'period', // Budget Summary: 'yearly' or 'monthly'
+  'budget_id', 'dimension', // Budget Summary: which budget, and one subdivision of it
   'bs_from', // Balance Sheet: optional From date → Current-Year-Earnings split point
 ]);
 

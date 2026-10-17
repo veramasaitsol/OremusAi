@@ -114,6 +114,8 @@ const LEDGER_OPTIONAL_BUILDERS = new Set([
   // Always render the GSTR-3B section skeleton (numbered 3.1 / 3.1.1 / 3.2 / 4 / 5)
   // even for a realm with no synced ledger — the builder fills zeros itself.
   'gstreturnsworkbook',
+  // Budgets are synced on their own (acc_budgets), not read from the ledger.
+  'budgetsummary',
 ]);
 
 // Honest empty report — returned when a report has no DB builder or the realm

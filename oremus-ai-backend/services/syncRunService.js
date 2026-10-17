@@ -80,6 +80,9 @@ function humanizeSyncError(provider, what, err) {
   if (provider === 'xero' && status === 401 && /payment|overpayment|prepayment/i.test(what)) {
     return `Xero denied access to ${what} — the connection is missing the accounting.payments.read permission. Grant it and reconnect Xero.`;
   }
+  if (provider === 'xero' && (status === 401 || status === 403) && /budget/i.test(what)) {
+    return 'Xero denied access to budgets — the connection is missing the accounting.budgets.read permission. Grant it and reconnect Xero.';
+  }
   if (status === 401) return `${P} denied access while fetching ${what} — the connection may have expired or lacks a permission. Reconnect ${P}.`;
   if (status === 403) return `${P} refused access to ${what} — the connected ${P} user doesn't have permission to view it.`;
   if (status === 429) return `${P} rate limit reached while fetching ${what} — try the sync again in a few minutes.`;

@@ -49,6 +49,9 @@ function buildParams(filters = {}) {
   if (filters?.currency_code) out.currency_code = filters.currency_code;
   // Period mode for Budget Summary (yearly or monthly).
   if (filters?.period) out.period = filters.period;
+  // Budget Summary: which budget, and one QuickBooks subdivision of it.
+  if (filters?.budget_id) out.budget_id = filters.budget_id;
+  if (filters?.dimension) out.dimension = filters.dimension;
   // Show rows with zero balances (Executive Summary): emit real zeros, not "-".
   if (filters?.includeZero) out.include_zero = '1';
   if (filters?.refresh) out.refresh = '1';

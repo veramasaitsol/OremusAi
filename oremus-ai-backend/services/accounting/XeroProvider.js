@@ -86,6 +86,7 @@ const XERO_DB_BUILDERS = {
   executivesummary: (uid, p) => execSummary.buildExecutiveSummary(uid, p),
   cashsummary:      (uid, p) => cashSummary.buildCashSummary(uid, p),
   budgetvariance:   (uid, p) => budgetVariance.buildBudgetVariance(uid, p),
+  // Budget Manager budgets, synced into the shared acc_budgets tables.
   budgetsummary:    (uid, p) => budgetSummary.buildBudgetSummary(uid, p),
   tdssummary:       (uid, p) => buildTdsSummary(uid, p),
   recurringinvoices: (uid, p) => buildRecurringInvoices(uid, p),
@@ -116,6 +117,8 @@ const LEDGER_OPTIONAL_BUILDERS = new Set([
   // Always render the GSTR-3B section skeleton (numbered 3.1 / 3.1.1 / 3.2 / 4 / 5)
   // even for a tenant with no synced ledger — the builder fills zeros itself.
   'gstreturnsworkbook',
+  // Budgets come from Budget Manager, not the ledger.
+  'budgetsummary',
 ]);
 
 // Honest empty report — returned when a report has no DB builder or the tenant
